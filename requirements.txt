@@ -1,0 +1,15 @@
+fastapi
+uvicorn
+python-multipart
+llama-index-core
+llama-index-llms-openai
+llama-index-embeddings-openai
+llama-index-vector-stores-qdrant
+qdrant-client
+chonkie
+fastembed
+python-frontmatter
+pydantic
+httpx
+python-dateutil
+cachetools

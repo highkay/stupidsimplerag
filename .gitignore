@@ -1,0 +1,4 @@
+model_cache
+qdrant_data
+.env
+__pycache__
