@@ -1,0 +1,19 @@
+{% if error %}
+<div class="card error">
+    <h3>批量入库失败</h3>
+    <p>{{ error }}</p>
+</div>
+{% elif results %}
+<div class="card success">
+    <h3>批量入库完成</h3>
+    <ul class="sources">
+        {% for item in results %}
+        <li>
+            <strong>{{ item.filename }}</strong> · {{ item.chunks }} 切片 · {{ item.status }}
+        </li>
+        {% endfor %}
+    </ul>
+</div>
+{% else %}
+<div class="muted">暂无结果</div>
+{% endif %}

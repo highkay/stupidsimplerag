@@ -311,8 +311,6 @@ def get_query_engine(
     end_date: Optional[str] = None,
     filename: Optional[str] = None,
     filename_contains: Optional[str] = None,
-    keywords_any: Optional[List[str]] = None,
-    keywords_all: Optional[List[str]] = None,
 ):
     filters: Optional[MetadataFilters] = None
     filter_items: List[MetadataFilter] = []
@@ -342,22 +340,6 @@ def get_query_engine(
                 operator=FilterOperator.TEXT_MATCH_INSENSITIVE,
             )
         )
-    if keywords_any:
-        filter_items.append(
-            MetadataFilter(
-                key="keyword_list",
-                value=keywords_any,
-                operator=FilterOperator.ANY,
-            )
-        )
-    if keywords_all:
-        filter_items.append(
-            MetadataFilter(
-                key="keyword_list",
-                value=keywords_all,
-                operator=FilterOperator.ALL,
-            )
-        )
     if filter_items:
         filters = MetadataFilters(filters=filter_items)
 
@@ -372,6 +354,39 @@ def get_query_engine(
         filters=filters,
         node_postprocessors=[APIReranker(top_n=rerank_top_n)],
     )
+
+
+def get_collection_metrics() -> dict:
+    """Expose lightweight collection metrics for the web dashboard."""
+    metrics = {
+        "collection_name": getattr(vector_store, "collection_name", None),
+        "vectors_count": None,
+        "segments_count": None,
+        "status": "unknown",
+        "points_count": None,
+    }
+    collection = metrics["collection_name"]
+    client = getattr(vector_store, "client", None)
+    if not client or not collection:
+        return metrics
+
+    try:
+        info = client.collection_info(collection_name=collection)
+        metrics["status"] = getattr(info, "status", metrics["status"])
+        metrics["vectors_count"] = getattr(info, "vectors_count", None)
+        metrics["segments_count"] = getattr(info, "segments_count", None)
+    except Exception:
+        pass
+
+    try:
+        count_resp = client.count(collection_name=collection, exact=False)
+        metrics["points_count"] = getattr(count_resp, "count", None)
+    except Exception:
+        pass
+
+    return metrics
+
+
 class OpenAICompatibleLLM(OpenAI):
     """LLM wrapper that tolerates非标准 OpenAI 模型名."""
 

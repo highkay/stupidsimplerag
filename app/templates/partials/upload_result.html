@@ -1,0 +1,14 @@
+{% if error %}
+<div class="card error">
+    <h3>入库失败</h3>
+    <p>{{ error }}</p>
+</div>
+{% elif result %}
+<div class="card success">
+    <h3>入库完成</h3>
+    <p>{{ result.filename }} · {{ result.chunks }} 个切片</p>
+    <div class="muted">状态：{{ result.status }}</div>
+</div>
+{% else %}
+<div class="muted">暂无结果</div>
+{% endif %}

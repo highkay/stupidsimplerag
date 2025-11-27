@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+
+{% block content %}
+<section class="panel">
+    <h2>运行指标</h2>
+    <div class="cards">
+        <div class="card">
+            <h3>Qdrant 状态</h3>
+            <p>{{ metrics.status or "unknown" }}</p>
+            <div class="muted">集合：{{ metrics.collection_name or "-" }}</div>
+        </div>
+        <div class="card">
+            <h3>已入库向量</h3>
+            <p>{{ metrics.points_count or metrics.vectors_count or 0 }}</p>
+            <div class="muted">segments: {{ metrics.segments_count or 0 }}</div>
+        </div>
+        <div class="card">
+            <h3>缓存切片</h3>
+            <p>{{ cache_stats.entries }}</p>
+            <div class="muted">TTL {{ cache_stats.ttl }}s / Max {{ cache_stats.maxsize }}</div>
+        </div>
+    </div>
+</section>
+
+<section class="panel">
+    <h2>配置快照</h2>
+    <div class="cards">
+        <div class="card">
+            <h3>LLM</h3>
+            <p>{{ config.llm_model }}</p>
+            <div class="muted">Embedding: {{ config.embedding_model }}</div>
+        </div>
+        <div class="card">
+            <h3>Rerank</h3>
+            <p>{{ config.rerank_model }}</p>
+            <div class="muted">TopN {{ config.top_n_rerank }}</div>
+        </div>
+        <div class="card">
+            <h3>检索参数</h3>
+            <p>TopK {{ config.top_k }}</p>
+            <div class="muted">最终返回 {{ config.final_top_k }}</div>
+        </div>
+    </div>
+</section>
+
+<section class="panel">
+    <h2>操作入口</h2>
+    <div class="cards">
+        <a class="card" href="/ui/upload">
+            <h3>单文件手动上传</h3>
+            <p>Ingest</p>
+            <div class="muted">Markdown 文档 + LLM 预处理</div>
+        </a>
+        <a class="card" href="/ui/upload/batch">
+            <h3>批量上传</h3>
+            <p>Batch</p>
+            <div class="muted">多文件并行触发 ETL</div>
+        </a>
+        <a class="card" href="/ui/chat">
+            <h3>在线查询</h3>
+            <p>Chat</p>
+            <div class="muted">混合检索 + rerank</div>
+        </a>
+    </div>
+</section>
+{% endblock %}

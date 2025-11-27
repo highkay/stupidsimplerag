@@ -1,0 +1,28 @@
+{% if error %}
+<div class="card error">
+    <h3>查询失败</h3>
+    <p>{{ error }}</p>
+</div>
+{% elif result %}
+<div class="card">
+    <h3>回答</h3>
+    <p>{{ result.answer }}</p>
+</div>
+<div class="card">
+    <h3>命中切片 ({{ result.sources | length }})</h3>
+    <ul class="sources">
+        {% for src in result.sources %}
+        <li>
+            <strong>{{ src.filename }}</strong>
+            <div class="muted">
+                日期: {{ src.date or "未知" }} · 分数: {{ '%.4f'|format(src.score or 0) }}
+            </div>
+            <div>{{ src.text }}</div>
+            <div class="muted">关键词: {{ src.keywords or "-" }}</div>
+        </li>
+        {% endfor %}
+    </ul>
+</div>
+{% else %}
+<div class="muted">尚无查询结果</div>
+{% endif %}

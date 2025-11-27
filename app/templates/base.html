@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>stupidsimplerag 控制台</title>
+    <link rel="stylesheet" href="{{ url_for('static', path='styles.css') }}">
+    <script src="https://unpkg.com/htmx.org@1.9.12" integrity="sha384-TK1YrY8ApX2HFOKRSbuuSSMzdON3NofM8JrIoVNewc19hXtF87o5iVbQ+9Y9Rajp" crossorigin="anonymous"></script>
+</head>
+<body>
+    <header class="app-header">
+        <div class="branding">
+            <span class="title">stupidsimplerag</span>
+            <span class="subtitle">金融级极速 RAG 控制面板</span>
+        </div>
+        <nav class="nav">
+            <a href="/">指标</a>
+            <a href="/ui/upload">手动上传</a>
+            <a href="/ui/upload/batch">批量上传</a>
+            <a href="/ui/chat">查询</a>
+        </nav>
+    </header>
+    <main>
+        {% block content %}{% endblock %}
+    </main>
+    <div id="htmx-indicator" class="indicator">处理中...</div>
+</body>
+</html>

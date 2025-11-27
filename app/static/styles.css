@@ -1,0 +1,166 @@
+:root {
+    font-family: "Segoe UI", system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+    color: #0d1117;
+    background-color: #f4f6fb;
+}
+
+body {
+    margin: 0;
+    background-color: inherit;
+}
+
+.app-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 1rem 2rem;
+    background: #111827;
+    color: #fff;
+}
+
+.branding .title {
+    font-weight: 700;
+    font-size: 1.1rem;
+    margin-right: 0.75rem;
+}
+
+.branding .subtitle {
+    font-size: 0.9rem;
+    color: #9ca3af;
+}
+
+.nav a {
+    margin-left: 1rem;
+    color: #f3f4f6;
+    text-decoration: none;
+    font-weight: 500;
+}
+
+.nav a:hover {
+    color: #60a5fa;
+}
+
+main {
+    padding: 2rem;
+}
+
+.cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 1rem;
+}
+
+.card {
+    background: #fff;
+    border-radius: 12px;
+    padding: 1.25rem;
+    box-shadow: 0 8px 18px rgba(15, 23, 42, 0.08);
+}
+
+.card h3 {
+    margin: 0 0 0.5rem 0;
+    font-size: 0.95rem;
+    text-transform: uppercase;
+    color: #818cf8;
+    letter-spacing: 0.08em;
+}
+
+.card p {
+    margin: 0;
+    font-size: 1.8rem;
+    font-weight: 600;
+}
+
+.muted {
+    color: #6b7280;
+    font-size: 0.95rem;
+}
+
+.panel {
+    background: #fff;
+    border-radius: 16px;
+    padding: 2rem;
+    margin-bottom: 2rem;
+    box-shadow: 0 14px 24px rgba(15, 23, 42, 0.1);
+}
+
+form {
+    display: grid;
+    gap: 1rem;
+}
+
+.date-range {
+    display: grid;
+    gap: 0.5rem;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+}
+
+label {
+    font-weight: 600;
+    font-size: 0.95rem;
+    color: #374151;
+}
+
+input[type="text"],
+input[type="date"],
+input[type="file"],
+textarea {
+    border: 1px solid #d1d5db;
+    border-radius: 10px;
+    padding: 0.65rem 0.85rem;
+    font-size: 1rem;
+}
+
+button {
+    background: linear-gradient(135deg, #2563eb, #7c3aed);
+    border: none;
+    color: #fff;
+    border-radius: 10px;
+    padding: 0.85rem 1rem;
+    font-size: 1rem;
+    font-weight: 600;
+    cursor: pointer;
+}
+
+button:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
+.indicator {
+    position: fixed;
+    bottom: 1rem;
+    right: 1rem;
+    background: #111827;
+    color: #fff;
+    padding: 0.75rem 1rem;
+    border-radius: 999px;
+    opacity: 0;
+    transition: opacity 0.25s ease;
+}
+
+.indicator.htmx-request {
+    opacity: 1;
+}
+
+.result {
+    margin-top: 1.5rem;
+}
+
+.error {
+    border-left: 4px solid #ef4444;
+}
+
+.success {
+    border-left: 4px solid #10b981;
+}
+
+.sources {
+    list-style: none;
+    padding-left: 0;
+}
+
+.sources li {
+    border-bottom: 1px solid #e5e7eb;
+    padding: 0.75rem 0;
+}

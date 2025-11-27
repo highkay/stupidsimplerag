@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+
+{% block content %}
+<section class="panel">
+    <h2>查询 / 混合检索</h2>
+    <p class="muted">内置低成本混合检索（Dense + Sparse）与 rerank，可在这里快速验证召回质量。</p>
+    <form
+        method="post"
+        action="/ui/chat/query"
+        hx-post="/ui/chat/query"
+        hx-target="#chat-result"
+        hx-swap="innerHTML"
+        hx-indicator="#htmx-indicator"
+    >
+        <label for="query">问题</label>
+        <input type="text" id="query" name="query" placeholder="例如：英伟达最新财报表现" required>
+
+        <label>时间过滤器</label>
+        <div class="date-range">
+            <input type="date" name="start_date" placeholder="起始日期">
+            <input type="date" name="end_date" placeholder="结束日期">
+        </div>
+
+        <label for="filename">文件名（精确匹配）</label>
+        <input type="text" id="filename" name="filename" placeholder="20250228_NVIDIA_Report.md">
+
+        <label for="filename_contains">文件名包含</label>
+        <input type="text" id="filename_contains" name="filename_contains" placeholder="NVIDIA">
+
+        <label for="keywords_any">包含任意关键词（逗号分隔）</label>
+        <input type="text" id="keywords_any" name="keywords_any" placeholder="NVDA, 英伟达, GPU">
+
+        <label for="keywords_all">同时包含关键词</label>
+        <input type="text" id="keywords_all" name="keywords_all" placeholder="数据中心, 盈亏">
+
+        <button type="submit">执行检索</button>
+    </form>
+    <div id="chat-result" class="result">
+        {% include "partials/chat_result.html" %}
+    </div>
+</section>
+{% endblock %}

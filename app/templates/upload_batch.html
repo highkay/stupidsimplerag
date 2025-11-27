@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+
+{% block content %}
+<section class="panel">
+    <h2>批量上传</h2>
+    <p class="muted">批量触发 ETL，适合一次性导入多个财报。文件格式需为 Markdown。</p>
+    <form
+        method="post"
+        action="/ui/ingest/batch"
+        hx-post="/ui/ingest/batch"
+        hx-target="#batch-result"
+        hx-swap="innerHTML"
+        hx-indicator="#htmx-indicator"
+        hx-encoding="multipart/form-data"
+        enctype="multipart/form-data"
+    >
+        <label for="files">选择多个 Markdown 文件</label>
+        <input type="file" id="files" name="files" multiple accept=".md" required>
+        <button type="submit">批量入库</button>
+    </form>
+    <div id="batch-result" class="result">
+        {% include "partials/batch_result.html" %}
+    </div>
+</section>
+{% endblock %}

@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+
+{% block content %}
+<section class="panel">
+    <h2>手动上传 Markdown</h2>
+    <p class="muted">系统会调用 LLM 执行摘要/表格/同义词提炼，并自动入库到 Qdrant。</p>
+    <form
+        method="post"
+        action="/ui/ingest"
+        hx-post="/ui/ingest"
+        hx-target="#upload-result"
+        hx-swap="innerHTML"
+        hx-indicator="#htmx-indicator"
+        hx-encoding="multipart/form-data"
+        enctype="multipart/form-data"
+    >
+        <label for="file">选择 Markdown 文件</label>
+        <input type="file" id="file" name="file" accept=".md" required>
+        <button type="submit">开始入库</button>
+    </form>
+    <div id="upload-result" class="result">
+        {% include "partials/upload_result.html" %}
+    </div>
+</section>
+{% endblock %}
