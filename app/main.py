@@ -47,6 +47,58 @@ def _cache_key(body: ChatRequest) -> str:
     return hashlib.md5(raw.encode()).hexdigest()
 
 
+def _parse_epoch_date(raw: str) -> Optional[str]:
+    try:
+        ts = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if ts > 3_000_000_000_000:  # handle ms timestamps
+        ts /= 1000.0
+    try:
+        dt = datetime.datetime.utcfromtimestamp(ts)
+    except (OverflowError, OSError, ValueError):
+        return None
+    return dt.date().isoformat()
+
+
+def _parse_iso_date(raw: str) -> Optional[str]:
+    if not raw:
+        return None
+    text = raw.strip()
+    if not text:
+        return None
+    # Replace trailing Z with +00:00 for fromisoformat compatibility
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        dt = datetime.datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    return dt.date().isoformat()
+
+
+def _extract_upload_date(upload: UploadFile) -> Optional[str]:
+    if not upload:
+        return None
+    header_value = upload.headers.get("x-file-mtime")
+    if not header_value:
+        return None
+    date_str = _parse_epoch_date(header_value) or _parse_iso_date(header_value)
+    if not date_str:
+        logger.warning(
+            "Failed to parse X-File-Mtime header=%r for file=%s",
+            header_value,
+            upload.filename,
+        )
+    else:
+        logger.debug(
+            "Resolved ingest date %s from file timestamp header for %s",
+            date_str,
+            upload.filename,
+        )
+    return date_str
+
+
 def _parse_keywords(raw: Optional[str]) -> Optional[List[str]]:
     if not raw:
         return None
@@ -119,7 +171,8 @@ async def ingest_api(file: UploadFile = File(...)) -> IngestResponse:
 
     logger.info("Ingest single file=%s", file.filename)
     content = (await file.read()).decode("utf-8")
-    nodes = await process_file(file.filename, content)
+    ingest_date = _extract_upload_date(file)
+    nodes = await process_file(file.filename, content, ingest_date=ingest_date)
     if nodes:
         insert_nodes(nodes)
     logger.info("Ingest complete file=%s chunks=%d", file.filename, len(nodes))
@@ -137,7 +190,8 @@ async def ingest_batch(files: List[UploadFile] = File(...)) -> List[IngestRespon
         if not (upload.filename.endswith(".md") or upload.filename.endswith(".txt")):
             raise HTTPException(status_code=400, detail=f"Only .md or .txt supported: {upload.filename}")
         content = (await upload.read()).decode("utf-8")
-        nodes = await process_file(upload.filename, content)
+        ingest_date = _extract_upload_date(upload)
+        nodes = await process_file(upload.filename, content, ingest_date=ingest_date)
         if nodes:
             insert_nodes(nodes)
         logger.info(

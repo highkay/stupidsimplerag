@@ -147,6 +147,7 @@ def _init_embedding_model() -> BaseEmbedding:
     try:
         return OpenAIEmbedding(
             model=model_name,
+            dimensions=embedding_dim,
             **embedding_kwargs,
         )
     except ValueError:

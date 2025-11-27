@@ -2,7 +2,7 @@ import argparse
 import logging
 import os
 from pathlib import Path
-from typing import Iterable, List, Sequence, Tuple
+from typing import Any, Iterable, List, Sequence, Tuple
 
 import httpx
 
@@ -34,8 +34,23 @@ def _mime_type(path: Path) -> str:
     return "text/markdown" if path.suffix.lower() == ".md" else "text/plain"
 
 
+def _file_headers(path: Path) -> dict:
+    try:
+        mtime = path.stat().st_mtime
+        return {"X-File-Mtime": str(mtime)}
+    except OSError:
+        return {}
+
+
 def ingest_single(client: httpx.Client, url: str, path: Path) -> Tuple[bool, str]:
-    files = {"file": (path.name, path.read_bytes(), _mime_type(path))}
+    files = {
+        "file": (
+            path.name,
+            path.read_bytes(),
+            _mime_type(path),
+            _file_headers(path),
+        )
+    }
     resp = client.post(url, files=files, timeout=30.0)
     if resp.status_code == 200:
         return True, resp.text
@@ -47,12 +62,17 @@ def ingest_batch(
     url: str,
     paths: List[Path],
 ) -> Tuple[bool, str]:
-    files: List[Tuple[str, Tuple[str, bytes, str]]] = []
+    files: List[Tuple[str, Tuple[Any, ...]]] = []
     for path in paths:
         files.append(
             (
                 "files",
-                (path.name, path.read_bytes(), _mime_type(path)),
+                (
+                    path.name,
+                    path.read_bytes(),
+                    _mime_type(path),
+                    _file_headers(path),
+                ),
             )
         )
     resp = client.post(url, files=files, timeout=60.0)
