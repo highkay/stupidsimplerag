@@ -1,7 +1,7 @@
 import json
 import logging
 import os
-from typing import Any, List, Optional
+from typing import Any, Callable, List, Optional, Tuple
 from urllib.parse import urlparse, urlunparse
 
 import httpx
@@ -18,6 +18,11 @@ from llama_index.core.vector_stores import (
 from llama_index.embeddings.openai import OpenAIEmbedding
 from llama_index.llms.openai import OpenAI
 from llama_index.vector_stores.qdrant import QdrantVectorStore
+from llama_index.vector_stores.qdrant.base import (
+    DEFAULT_SPARSE_VECTOR_NAME,
+    DEFAULT_SPARSE_VECTOR_NAME_OLD,
+)
+from llama_index.vector_stores.qdrant.utils import fastembed_sparse_encoder
 from qdrant_client import QdrantClient
 from qdrant_client.http import models as qdrant_models
 
@@ -36,6 +41,10 @@ llm_base, llm_key = get_openai_config("LLM")
 embedding_kwargs = get_openai_kwargs("EMBEDDING")
 embedding_dim = int(os.getenv("EMBEDDING_DIM", "1536"))
 llm_context_window = int(os.getenv("LLM_CONTEXT_WINDOW", "8192"))
+fastembed_model_name = os.getenv(
+    "FASTEMBED_SPARSE_MODEL", "Qdrant/bm42-all-minilm-l6-v2-attentions"
+)
+fastembed_cache_dir = os.getenv("FASTEMBED_CACHE_PATH")
 
 
 class OpenAICompatibleEmbedding(BaseEmbedding):
@@ -220,7 +229,36 @@ class APIReranker(BaseNodePostprocessor):
 
 
 class SafeQdrantVectorStore(QdrantVectorStore):
-    """Qdrant 适配层，兜底缺失的返回字段。"""
+    """Qdrant adapter that normalizes outputs and enforces FastEmbed sparse encoders."""
+
+    def _resolve_sparse_model(self, override: Optional[str] = None) -> str:
+        return override or fastembed_model_name
+
+    def _build_fastembed_encoder(
+        self, fastembed_sparse_model: Optional[str]
+    ) -> Callable[[List[str]], Tuple[List[List[int]], List[List[float]]]]:
+        return fastembed_sparse_encoder(
+            model_name=self._resolve_sparse_model(fastembed_sparse_model),
+            cache_dir=fastembed_cache_dir,
+        )
+
+    def get_default_sparse_doc_encoder(
+        self,
+        collection_name: str,
+        fastembed_sparse_model: Optional[str] = None,
+    ):
+        if self._client is not None and self.use_old_sparse_encoder(collection_name):
+            self.sparse_vector_name = DEFAULT_SPARSE_VECTOR_NAME_OLD
+        return self._build_fastembed_encoder(fastembed_sparse_model)
+
+    def get_default_sparse_query_encoder(
+        self,
+        collection_name: str,
+        fastembed_sparse_model: Optional[str] = None,
+    ):
+        if self._client is not None and self.use_old_sparse_encoder(collection_name):
+            self.sparse_vector_name = DEFAULT_SPARSE_VECTOR_NAME_OLD
+        return self._build_fastembed_encoder(fastembed_sparse_model)
 
     def query(self, *args: Any, **kwargs: Any):
         result = super().query(*args, **kwargs)
@@ -247,7 +285,7 @@ def _ensure_hybrid_collection(
                 )
             },
             sparse_vectors_config={
-                "text-sparse": qdrant_models.SparseVectorParams(
+                DEFAULT_SPARSE_VECTOR_NAME: qdrant_models.SparseVectorParams(
                     index=qdrant_models.SparseIndexParams()
                 )
             },
@@ -290,8 +328,8 @@ def _build_qdrant_store() -> QdrantVectorStore:
             collection_name=collection,
             enable_hybrid=True,
             dense_vector_name="text-dense",
-            sparse_vector_name="text-sparse",
-            fastembed_sparse_model="Qdrant/bm42-all-minilm-l6-v2-attentions",
+            sparse_vector_name=DEFAULT_SPARSE_VECTOR_NAME,
+            fastembed_sparse_model=fastembed_model_name,
         )
 
     if qdrant_url:
