@@ -1,64 +1,66 @@
 # stupidsimplerag
 
-Finance-grade single-node RAG blueprint with heavy preprocessing (LLM-assisted summarization + table narration + keyword expansion) and lightweight runtime retrieval (hybrid Qdrant + API rerank + time-decay).
+金融级单机 RAG，理念是“重预处理，轻运行时”：入库阶段用 LLM 生成摘要/表格解读/同义词，查询阶段依靠 Qdrant 混合检索 + API Rerank + 应用层时间衰减拿到稳定的 Finance Answer。
 
-## Quick start
+## 快速启动
 
 ```bash
 git clone <repo>
 cd stupidsimplerag
-cp .env.example .env  # fill API keys & Qdrant config
+cp .env.example .env  # 补齐模型、Qdrant 配置
 docker-compose up -d --build
 ```
 
-FastAPI on `:8000` exposes:
+容器会拉起 `qdrant` 和 `api`，FastAPI 默认监听 `localhost:8000`。
 
-- `POST /ingest`: upload Markdown files (rich context header injected per chunk, dedup via deterministic IDs).
-- `POST /ingest/batch`: same as above but accepts multiple Markdown files in a single multipart request.
-- `POST /chat`: hybrid dense+sparse retrieval with API rerank + time decay + LRU semantic cache.
+## HTTP API 一览
 
-## Architecture
+| Endpoint | 用途 | 请求格式 | 说明 |
+| --- | --- | --- | --- |
+| `POST /ingest` | 单文件入库 | `file=@xxx.md` (multipart) | 仅接受 Markdown，上传后自动切分 + 富语义头部注入。 |
+| `POST /ingest/batch` | 批量入库 | 多个 `files=@*.md` 字段 | 返回 JSON 数组，结构与 `/ingest` 相同。 |
+| `POST /chat` | 检索 + 生成 | `{"query":"…","start_date":"YYYY-MM-DD","end_date":"YYYY-MM-DD"}` | filter 字段可选，响应遵循 `ChatResponse`/`SourceItem`。 |
 
-- **Ingest**: Chonkie token splitting + LLM tri-pass (summary, table narrative, synonyms) → embeddable TextNodes.
-- **Storage**: Qdrant on-disk hybrid collection (`text-dense` + FastEmbed BM42 `text-sparse`).
-- **Retrieval**: LlamaIndex QueryEngine (hybrid search → metadata filters → API rerank → apply_time_decay).
-- **Runtime APIs**: FastAPI with TTLCache for chat semantics, Markdown-only ingest (pre-converted upstream).
+> 文件名、关键词、时间范围都会被映射到 Qdrant 元数据过滤；返回的 `sources` 会附带 `filename/date/score/keywords/text` 方便外部前端直接渲染。
 
-### Preprocessing prompt
+### 示例
 
-LLM prompt enforces strict JSON schema (`summary`, `table_narrative`, `keywords[]`) and outputs are validated via Pydantic (`LLMAnalysis`). Broken or partial responses are auto-normalized (empty strings / keyword dedupe) to keep ingestion deterministic.
+```bash
+curl -X POST http://localhost:8000/ingest -F "file=@./docs/sample_report.md"
 
-## Configuration (.env)
-
-Fill these key variables:
-
-```
-LLM_MODEL, OPENAI_API_KEY, OPENAI_API_BASE
-EMBEDDING_MODEL, EMBEDDING_API_KEY, EMBEDDING_API_BASE, EMBEDDING_DIM
-RERANK_API_URL, RERANK_API_KEY, RERANK_MODEL
-QDRANT_HOST/PORT/COLLECTION_NAME
-QDRANT_HTTPS, QDRANT_URL, QDRANT_API_KEY
-TOP_K_RETRIEVAL, TOP_N_RERANK, FINAL_TOP_K, TIME_DECAY_RATE, SPARSE_TOP_K
-FASTEMBED_CACHE_PATH, FASTEMBED_SPARSE_MODEL
+curl -X POST http://localhost:8000/chat -H "Content-Type: application/json" -d '{"query":"英伟达最新财报表现","start_date":"2025-01-01"}'
 ```
 
-`FASTEMBED_*` controls cached downloads of `Qdrant/bm42-all-minilm-l6-v2-attentions`; `preload_models.py` warms the cache during Docker builds.
+## 工作流速览
 
-## Development
+1. **预处理**：Chonkie 按 token 切分 → LLM 一次性生成 `summary/table_narrative/keywords` → 生成富语义 header 并拼接到每个 chunk。
+2. **入库**：TextNode 携带 `filename/date/keywords/original_text` 写入 Qdrant 混合集合（Dense + FastEmbed BM42 Sparse），节点 ID 由 `filename + chunk_id` 哈希保证幂等。
+3. **查询**：LlamaIndex QueryEngine 走 hybrid 检索（Top-K=100，可选时间过滤）→ API rerank Top-N=20 → `apply_time_decay` 线性衰减旧文档分数 → 保留 FINAL_TOP_K 命中。
+4. **服务层**：FastAPI + TTLCache 以 `query+date_range` 为 key 做 1 小时语义缓存；Markdown-only 入库保证运行时简单可靠。
 
-- Install deps: `pip install -r requirements.txt`
-- Run API: `uvicorn app.main:app --reload`
-- Seed data: `curl -X POST http://localhost:8000/ingest -F "file=@docs/sample.md"`
-- Query: `curl -X POST http://localhost:8000/chat -H "Content-Type: application/json" -d '{"query":"英伟达最新财报表现"}'`
+## 关键配置 (.env)
 
-## Notes
+- **LLM / Embedding / Rerank**：`LLM_MODEL`, `OPENAI_API_KEY`, `EMBEDDING_MODEL`, `EMBEDDING_DIM`, `RERANK_API_URL` 等；默认遵循 OpenAI 兼容协议，可指向 DeepSeek、SiliconFlow。
+- **Qdrant**：`QDRANT_HOST`, `QDRANT_PORT`, `QDRANT_URL`, `QDRANT_API_KEY`, `COLLECTION_NAME`, `QDRANT_HTTPS`。如使用托管集群，只需填 URL + API Key。
+- **策略**：`TOP_K_RETRIEVAL`, `TOP_N_RERANK`, `FINAL_TOP_K`, `TIME_DECAY_RATE`, `SPARSE_TOP_K`。可按业务调优 recall / latency。
+- **FastEmbed 缓存**：`FASTEMBED_CACHE_PATH`, `FASTEMBED_SPARSE_MODEL`；`preload_models.py` 可提前把 BM42 模型下载到镜像。
 
-- Repo assumes upstream crawlers already normalize documents to Markdown.
-- Qdrant collection auto-creates; delete it manually if changing `EMBEDDING_DIM`.
-- Tune `SPARSE_TOP_K` / `TOP_K_RETRIEVAL` for recall vs throughput.
-- Managed Qdrant example (set `QDRANT_URL`/`QDRANT_API_KEY` accordingly):
+## 本地开发
 
-  ```bash
-  curl -X GET 'https://<waiting-for-cluster-host>:6333' \
-    --header 'api-key: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhY2Nlc3MiOiJtIn0.JxVRUBtR2jfv4XxYRvFYnBArICgRzhbPv_b3zScsANo'
-  ```
+```bash
+pip install -r requirements.txt
+uvicorn app.main:app --reload  # 默认读取 .env
+curl -X POST http://localhost:8000/ingest -F "file=@docs/sample.md"
+curl -X POST http://localhost:8000/chat -H "Content-Type: application/json" -d '{"query":"英伟达最新财报表现"}'
+```
+
+常见操作：
+
+- Markdown 需在入库前完成转换（爬虫/ETL 阶段处理 PDF/TXT）。
+- 若调整 `EMBEDDING_DIM`，请清空 `qdrant_data` 以重新建集合。
+- 连接托管 Qdrant 时可用 `curl -X GET <QDRANT_URL>` + `api-key` 快速做健康检查。
+
+## 了解更多
+
+- 架构细节、Prompt、数据模型请参考 `AGENTS.md` 与 `app/*.py` 源码，那里涵盖全量实现。
+- 想提前热身稀疏模型，可运行 `python preload_models.py` 加速第一次部署。

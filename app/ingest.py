@@ -62,6 +62,10 @@ async def analyze_document(text: str) -> LLMAnalysis:
 
 async def process_file(filename: str, content: str) -> List[TextNode]:
     meta_date = extract_date_from_filename(filename) or "1970-01-01"
+    try:
+        meta_date_numeric = int(meta_date.replace("-", ""))
+    except ValueError:
+        meta_date_numeric = 19700101
     analysis = await analyze_document(content)
 
     keywords = analysis.keywords
@@ -83,7 +87,9 @@ async def process_file(filename: str, content: str) -> List[TextNode]:
             metadata={
                 "filename": filename,
                 "date": meta_date,
+                "date_numeric": meta_date_numeric,
                 "keywords": keywords_str,
+                "keyword_list": keywords,
                 "original_text": chunk_text,
             },
         )

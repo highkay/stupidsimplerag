@@ -1,6 +1,6 @@
 import hashlib
 import os
-from typing import Dict
+from typing import Dict, List
 
 from cachetools import TTLCache
 from fastapi import FastAPI, File, HTTPException, UploadFile
@@ -15,7 +15,16 @@ CACHE = TTLCache(maxsize=1000, ttl=3600)
 
 
 def _cache_key(body: ChatRequest) -> str:
-    raw = f"{body.query}_{body.start_date}_{body.end_date}"
+    parts = [
+        body.query,
+        body.start_date or "",
+        body.end_date or "",
+        body.filename or "",
+        body.filename_contains or "",
+        ",".join(body.keywords_any or []),
+        ",".join(body.keywords_all or []),
+    ]
+    raw = "|".join(parts)
     return hashlib.md5(raw.encode()).hexdigest()
 
 
@@ -75,7 +84,14 @@ async def chat_api(req: ChatRequest) -> ChatResponse:
         cached = CACHE[key]
         return ChatResponse(**cached)
 
-    engine = get_query_engine(req.start_date, req.end_date)
+    engine = get_query_engine(
+        start_date=req.start_date,
+        end_date=req.end_date,
+        filename=req.filename,
+        filename_contains=req.filename_contains,
+        keywords_any=req.keywords_any,
+        keywords_all=req.keywords_all,
+    )
     response = engine.query(req.query)
     source_nodes = getattr(response, "source_nodes", []) or []
 

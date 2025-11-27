@@ -9,6 +9,16 @@ class ChatRequest(BaseModel):
     query: str = Field(..., description="User question, plain text")
     start_date: Optional[str] = Field(None, description="YYYY-MM-DD lower bound")
     end_date: Optional[str] = Field(None, description="YYYY-MM-DD upper bound")
+    filename: Optional[str] = Field(None, description="Exact filename to filter on")
+    filename_contains: Optional[str] = Field(
+        None, description="Case-insensitive substring/full-text match on filename"
+    )
+    keywords_any: Optional[List[str]] = Field(
+        None, description="Return slices that contain at least one of these keywords"
+    )
+    keywords_all: Optional[List[str]] = Field(
+        None, description="Return slices that contain all of these keywords"
+    )
 
 
 class SourceItem(BaseModel):
