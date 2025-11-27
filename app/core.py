@@ -142,21 +142,99 @@ class OpenAICompatibleEmbedding(BaseEmbedding):
         return self._embedding_request(texts)
 
 
+class FixedDimensionEmbedding(BaseEmbedding):
+    """Ensure embedding outputs never exceed the configured dimension size."""
+
+    def __init__(self, base_model: BaseEmbedding, target_dim: Optional[int]) -> None:
+        base_name = getattr(base_model, "model_name", None) or getattr(
+            base_model, "_model_name", "embedding"
+        )
+        super().__init__(model_name=f"{base_name}-fixed-dim")
+        self._base_model = base_model
+        self._target_dim = target_dim or 0
+
+    def __getattr__(self, name: str) -> Any:
+        """Proxy any other attribute access to the wrapped embedding."""
+        return getattr(self._base_model, name)
+
+    def _trim_vector(self, embedding: Optional[List[float]]) -> Optional[List[float]]:
+        if embedding is None or self._target_dim <= 0:
+            return embedding
+        if len(embedding) > self._target_dim:
+            return embedding[: self._target_dim]
+        return embedding
+
+    def _trim_batch(self, embeddings: Optional[List[List[float]]]) -> Optional[List[List[float]]]:
+        if embeddings is None or self._target_dim <= 0:
+            return embeddings
+        return [self._trim_vector(vec) or [] for vec in embeddings]
+
+    def _get_query_embedding(self, query: str) -> List[float]:
+        return self._trim_vector(self._base_model.get_query_embedding(query)) or []
+
+    async def _aget_query_embedding(self, query: str) -> List[float]:
+        base_async = getattr(self._base_model, "aget_query_embedding", None)
+        if callable(base_async):
+            embedding = await base_async(query)
+        else:
+            embedding = self._base_model.get_query_embedding(query)
+        return self._trim_vector(embedding) or []
+
+    def _get_text_embedding(self, text: str) -> List[float]:
+        return self._trim_vector(self._base_model.get_text_embedding(text)) or []
+
+    async def _aget_text_embedding(self, text: str) -> List[float]:
+        base_async = getattr(self._base_model, "aget_text_embedding", None)
+        if callable(base_async):
+            embedding = await base_async(text)
+        else:
+            embedding = self._base_model.get_text_embedding(text)
+        return self._trim_vector(embedding) or []
+
+    def _get_text_embeddings(self, texts: List[str]) -> List[List[float]]:
+        base_batch = getattr(self._base_model, "get_text_embeddings", None)
+        if callable(base_batch):
+            embeddings = base_batch(texts)
+        else:
+            embeddings = [self._base_model.get_text_embedding(text) for text in texts]
+        trimmed = self._trim_batch(embeddings) or []
+        return [vec if vec else [] for vec in trimmed]
+
+    async def _aget_text_embeddings(self, texts: List[str]) -> List[List[float]]:
+        base_async = getattr(self._base_model, "aget_text_embeddings", None)
+        if callable(base_async):
+            embeddings = await base_async(texts)
+        else:
+            embeddings = []
+            for text in texts:
+                embeddings.append(
+                    await self._base_model.aget_text_embedding(text)
+                    if hasattr(self._base_model, "aget_text_embedding")
+                    else self._base_model.get_text_embedding(text)
+                )
+        trimmed = self._trim_batch(embeddings) or []
+        return [vec if vec else [] for vec in trimmed]
+
+
 def _init_embedding_model() -> BaseEmbedding:
     model_name = os.getenv("EMBEDDING_MODEL")
+    base_model: BaseEmbedding
     try:
-        return OpenAIEmbedding(
+        base_model = OpenAIEmbedding(
             model=model_name,
             dimensions=embedding_dim,
             **embedding_kwargs,
         )
     except ValueError:
-        return OpenAICompatibleEmbedding(
+        base_model = OpenAICompatibleEmbedding(
             model=model_name,
             api_key=embedding_key,
             api_base=embedding_base,
             dimensions=embedding_dim,
         )
+    if embedding_dim > 0:
+        return FixedDimensionEmbedding(base_model, embedding_dim)
+    return base_model
 
 
 Settings.embed_model = _init_embedding_model()
