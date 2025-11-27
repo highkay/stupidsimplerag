@@ -311,7 +311,8 @@ def _build_qdrant_store() -> QdrantVectorStore:
             )
 
     resolved_host = host
-    if resolved_host == "qdrant":
+    running_in_container = os.path.exists("/.dockerenv")
+    if resolved_host == "qdrant" and not running_in_container:
         resolved_host = "127.0.0.1"
 
     local_client = QdrantClient(
