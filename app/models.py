@@ -40,6 +40,11 @@ class IngestResponse(BaseModel):
     filename: str
 
 
+class TextIngestRequest(BaseModel):
+    content: str = Field(..., description="Raw Markdown or text content")
+    filename: Optional[str] = Field(None, description="Optional logical filename for tracking")
+
+
 class LLMAnalysis(BaseModel):
     summary: str = ""
     table_narrative: str = ""

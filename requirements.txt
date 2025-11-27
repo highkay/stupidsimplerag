@@ -16,3 +16,4 @@ python-dateutil
 cachetools
 jinja2
 python-dotenv
+openai

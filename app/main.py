@@ -1,3 +1,4 @@
+import datetime
 import hashlib
 import logging
 import os
@@ -12,7 +13,13 @@ from fastapi.templating import Jinja2Templates
 
 from app.core import get_collection_metrics, get_query_engine, insert_nodes
 from app.ingest import process_file
-from app.models import ChatRequest, ChatResponse, IngestResponse, SourceItem
+from app.models import (
+    ChatRequest,
+    ChatResponse,
+    IngestResponse,
+    SourceItem,
+    TextIngestRequest,
+)
 from app.utils import apply_time_decay, get_node_metadata
 
 app = FastAPI(title="Finance RAG Engine")
@@ -107,8 +114,8 @@ def _filter_nodes_by_keywords(nodes, any_set, all_set):
 
 @app.post("/ingest", response_model=IngestResponse)
 async def ingest_api(file: UploadFile = File(...)) -> IngestResponse:
-    if not file.filename.endswith(".md"):
-        raise HTTPException(status_code=400, detail="Only .md supported")
+    if not (file.filename.endswith(".md") or file.filename.endswith(".txt")):
+        raise HTTPException(status_code=400, detail="Only .md or .txt supported")
 
     logger.info("Ingest single file=%s", file.filename)
     content = (await file.read()).decode("utf-8")
@@ -127,8 +134,8 @@ async def ingest_batch(files: List[UploadFile] = File(...)) -> List[IngestRespon
     results: List[IngestResponse] = []
     logger.info("Batch ingest start files=%d", len(files))
     for upload in files:
-        if not upload.filename.endswith(".md"):
-            raise HTTPException(status_code=400, detail=f"Only .md supported: {upload.filename}")
+        if not (upload.filename.endswith(".md") or upload.filename.endswith(".txt")):
+            raise HTTPException(status_code=400, detail=f"Only .md or .txt supported: {upload.filename}")
         content = (await upload.read()).decode("utf-8")
         nodes = await process_file(upload.filename, content)
         if nodes:
@@ -139,6 +146,23 @@ async def ingest_batch(files: List[UploadFile] = File(...)) -> List[IngestRespon
         results.append(IngestResponse(status="ok", chunks=len(nodes), filename=upload.filename))
     logger.info("Batch ingest finished total_files=%d", len(results))
     return results
+
+
+@app.post("/ingest/text", response_model=IngestResponse)
+async def ingest_text_api(body: TextIngestRequest) -> IngestResponse:
+    content = body.content.strip()
+    if not content:
+        raise HTTPException(status_code=400, detail="content must not be empty")
+
+    now = datetime.datetime.utcnow()
+    date_str = now.strftime("%Y-%m-%d")
+    filename = body.filename or f"inline_{now.strftime('%Y%m%d_%H%M%S')}.md"
+    logger.info("Text ingest filename=%s date=%s", filename, date_str)
+    nodes = await process_file(filename, content, ingest_date=date_str)
+    if nodes:
+        insert_nodes(nodes)
+    logger.info("Text ingest complete filename=%s chunks=%d", filename, len(nodes))
+    return IngestResponse(status="ok", chunks=len(nodes), filename=filename)
 
 
 @app.post("/chat", response_model=ChatResponse)

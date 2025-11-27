@@ -17,8 +17,9 @@ docker-compose up -d --build
 
 | Endpoint | 用途 | 请求格式 | 说明 |
 | --- | --- | --- | --- |
-| `POST /ingest` | 单文件入库 | `file=@xxx.md` (multipart) | 仅接受 Markdown，上传后自动切分 + 富语义头部注入。 |
-| `POST /ingest/batch` | 批量入库 | 多个 `files=@*.md` 字段 | 返回 JSON 数组，结构与 `/ingest` 相同。 |
+| `POST /ingest` | 单文件入库 | `file=@xxx.md/.txt` (multipart) | 支持 Markdown/TXT，上传后自动切分 + 富语义头部注入。 |
+| `POST /ingest/batch` | 批量入库 | 多个 `files=@*.md/.txt` 字段 | 返回 JSON 数组，结构与 `/ingest` 相同。 |
+| `POST /ingest/text` | 在线文本入库 | `{"content":"...","filename":"可选"}` | 直接推送 Markdown/TXT 文本，日期使用当前 UTC。 |
 | `POST /chat` | 检索 + 生成 | `{"query":"…","start_date":"YYYY-MM-DD","end_date":"YYYY-MM-DD"}` | filter 字段可选，响应遵循 `ChatResponse`/`SourceItem`。 |
 
 > 文件名、关键词、时间范围都会被映射到 Qdrant 元数据过滤；返回的 `sources` 会附带 `filename/date/score/keywords/text` 方便外部前端直接渲染。
@@ -28,7 +29,12 @@ docker-compose up -d --build
 ```bash
 curl -X POST http://localhost:8000/ingest -F "file=@./docs/sample_report.md"
 
-curl -X POST http://localhost:8000/chat -H "Content-Type: application/json" -d '{"query":"英伟达最新财报表现","start_date":"2025-01-01"}'
+curl -X POST http://localhost:8000/ingest/text \
+  -H "Content-Type: application/json" \
+  -d '{"filename":"20250301_NVDA.md","content":"# 财报\\n..."}'
+
+curl -X POST http://localhost:8000/chat -H "Content-Type: application/json" \
+  -d '{"query":"英伟达最新财报表现","start_date":"2025-01-01"}'
 ```
 
 ## 工作流速览
@@ -59,6 +65,7 @@ curl -X POST http://localhost:8000/chat -H "Content-Type: application/json" -d '
 - Markdown 需在入库前完成转换（爬虫/ETL 阶段处理 PDF/TXT）。
 - 若调整 `EMBEDDING_DIM`，请清空 `qdrant_data` 以重新建集合。
 - 连接托管 Qdrant 时可用 `curl -X GET <QDRANT_URL>` + `api-key` 快速做健康检查。
+- 离线批量导入：`python offline_ingest.py --dir ./docs --api-base http://127.0.0.1:8000 --batch-size 4`，递归读取 `.md/.txt` 并调用 `/ingest` 或 `/ingest/batch`，可用 `--dry-run` 预览。
 
 ## 了解更多
 

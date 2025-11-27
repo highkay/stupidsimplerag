@@ -1,5 +1,6 @@
 import hashlib
 import json
+import logging
 import os
 from typing import List
 
@@ -7,15 +8,17 @@ from chonkie import TokenChunker
 from llama_index.core.schema import TextNode
 from llama_index.llms.openai import OpenAI
 
-from app.utils import extract_date_from_filename
 from app.models import LLMAnalysis
+from app.openai_utils import get_openai_kwargs
+from app.utils import extract_date_from_filename
+
+logger = logging.getLogger("uvicorn.error")
 
 
 extractor_llm = OpenAI(
     model=os.getenv("LLM_MODEL"),
-    api_key=os.getenv("OPENAI_API_KEY"),
-    api_base=os.getenv("OPENAI_API_BASE"),
     temperature=0.1,
+    **get_openai_kwargs("LLM"),
 )
 
 chunker = TokenChunker(chunk_size=512, chunk_overlap=50)
@@ -51,21 +54,25 @@ async def analyze_document(text: str) -> LLMAnalysis:
 ```
 """
     try:
+        logger.debug("Analyzing document chunk len=%d", len(context))
         response = await extractor_llm.acomplete(prompt)
         content = getattr(response, "text", str(response)).strip()
         content = _strip_code_fence(content)
         data = json.loads(content)
+        logger.debug("Analyzer output keys=%s", list(data.keys()))
         return LLMAnalysis.model_validate(data)
     except Exception:
+        logger.exception("Analyzer failed, returning empty analysis")
         return LLMAnalysis()
 
 
-async def process_file(filename: str, content: str) -> List[TextNode]:
-    meta_date = extract_date_from_filename(filename) or "1970-01-01"
+async def process_file(filename: str, content: str, ingest_date: str | None = None) -> List[TextNode]:
+    meta_date = ingest_date or extract_date_from_filename(filename) or "1970-01-01"
     try:
         meta_date_numeric = int(meta_date.replace("-", ""))
     except ValueError:
         meta_date_numeric = 19700101
+    logger.info("Processing file=%s extracted_date=%s", filename, meta_date)
     analysis = await analyze_document(content)
 
     keywords = analysis.keywords
@@ -95,5 +102,5 @@ async def process_file(filename: str, content: str) -> List[TextNode]:
         )
         node.id_ = hashlib.md5(f"{filename}_{idx}".encode()).hexdigest()
         nodes.append(node)
-
+    logger.info("File=%s produced %d chunks", filename, len(nodes))
     return nodes

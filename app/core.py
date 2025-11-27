@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 from typing import Any, List, Optional
@@ -20,12 +21,19 @@ from llama_index.vector_stores.qdrant import QdrantVectorStore
 from qdrant_client import QdrantClient
 from qdrant_client.http import models as qdrant_models
 
+from app.openai_utils import (
+    get_openai_client,
+    get_openai_config,
+    get_openai_kwargs,
+)
+
 
 logger = logging.getLogger(__name__)
 
 
-embedding_api_key = os.getenv("EMBEDDING_API_KEY", os.getenv("OPENAI_API_KEY"))
-embedding_api_base = os.getenv("EMBEDDING_API_BASE", os.getenv("OPENAI_API_BASE"))
+embedding_base, embedding_key = get_openai_config("EMBEDDING")
+llm_base, llm_key = get_openai_config("LLM")
+embedding_kwargs = get_openai_kwargs("EMBEDDING")
 embedding_dim = int(os.getenv("EMBEDDING_DIM", "1536"))
 llm_context_window = int(os.getenv("LLM_CONTEXT_WINDOW", "8192"))
 
@@ -104,14 +112,13 @@ def _init_embedding_model() -> BaseEmbedding:
     try:
         return OpenAIEmbedding(
             model=model_name,
-            api_key=embedding_api_key,
-            api_base=embedding_api_base,
+            **embedding_kwargs,
         )
     except ValueError:
         return OpenAICompatibleEmbedding(
             model=model_name,
-            api_key=embedding_api_key,
-            api_base=embedding_api_base,
+            api_key=embedding_key,
+            api_base=embedding_base,
             dimensions=embedding_dim,
         )
 
@@ -120,51 +127,79 @@ Settings.embed_model = _init_embedding_model()
 
 
 class APIReranker(BaseNodePostprocessor):
-    top_n: int = 10
-    api_url: Optional[str] = None
-    api_key: Optional[str] = None
-    model: Optional[str] = None
+    """Single OpenAI-compatible reranker implementation."""
 
     def __init__(self, top_n: int = 10):
-        super().__init__(
-            top_n=top_n,
-            api_url=os.getenv("RERANK_API_URL"),
-            api_key=os.getenv("RERANK_API_KEY"),
-            model=os.getenv("RERANK_MODEL"),
-        )
+        super().__init__(top_n=top_n)
+        self.top_n = top_n
+        self.model = os.getenv("RERANK_MODEL")
+        self._client = None
+        try:
+            self._client = get_openai_client("RERANK", base_alias_env="RERANK_API_URL")
+        except Exception as exc:
+            logger.warning("Rerank disabled: failed to init OpenAI client (%s)", exc)
+            self._client = None
 
-    def _postprocess_nodes(
-        self, nodes: List[NodeWithScore], query_bundle: Optional[QueryBundle] = None
+    def _call_openai_api(
+        self,
+        nodes: List[NodeWithScore],
+        query_bundle: QueryBundle,
     ) -> List[NodeWithScore]:
-        if not nodes or not query_bundle or not self.api_url or not self.model:
+        if not nodes or not self._client or not self.model:
             return nodes[: self.top_n]
+
+        documents = []
+        for idx, node in enumerate(nodes):
+            text = node.node.get_content()
+            documents.append({"index": idx, "text": text})
+
+        doc_prompt_lines = [
+            f"Query: {query_bundle.query_str}",
+            "Documents:",
+        ]
+        for doc in documents:
+            snippet = doc["text"].strip().replace("\n", " ")[:2000]
+            doc_prompt_lines.append(f"- [{doc['index']}] {snippet}")
+        doc_prompt_lines.append(
+            "Return JSON list like [{\"index\":0,\"score\":0.87}, ...] sorted by relevance. "
+            "Keep score between 0 and 1."
+        )
+        user_content = "\n".join(doc_prompt_lines)
 
         try:
-            payload = {
-                "model": self.model,
-                "query": query_bundle.query_str,
-                "documents": [n.node.get_content() for n in nodes],
-                "top_n": self.top_n,
-                "return_documents": False,
-            }
-            headers = {"Content-Type": "application/json"}
-            if self.api_key:
-                headers["Authorization"] = f"Bearer {self.api_key}"
-
-            with httpx.Client(timeout=10.0) as client:
-                resp = client.post(self.api_url, json=payload, headers=headers)
-                resp.raise_for_status()
-                data = resp.json()
-        except Exception:
+            response = self._client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "You are a precise reranker that outputs JSON.",
+                    },
+                    {
+                        "role": "user",
+                        "content": user_content,
+                    },
+                ],
+                temperature=0.0,
+            )
+            content = (
+                response.choices[0].message.content if response.choices else None
+            )
+            if not content:
+                return nodes[: self.top_n]
+            content = content.strip()
+            if content.startswith("```"):
+                content = content.split("```", 2)[1]
+            data = json.loads(content)
+        except Exception as exc:
+            logger.warning("OpenAI rerank failed: %s", exc)
             return nodes[: self.top_n]
 
-        results = data.get("results", data.get("data", []))
         ranked: List[NodeWithScore] = []
-        for item in results:
+        for item in data:
             idx = item.get("index")
             if idx is None or idx >= len(nodes):
                 continue
-            score = item.get("relevance_score", item.get("score"))
+            score = item.get("score")
             node = nodes[idx]
             if score is not None:
                 node.score = float(score)
@@ -174,7 +209,14 @@ class APIReranker(BaseNodePostprocessor):
             return nodes[: self.top_n]
 
         ranked.sort(key=lambda x: (x.score or 0.0), reverse=True)
-        return ranked
+        return ranked[: self.top_n]
+
+    def _postprocess_nodes(
+        self, nodes: List[NodeWithScore], query_bundle: Optional[QueryBundle] = None
+    ) -> List[NodeWithScore]:
+        if not nodes or not query_bundle:
+            return nodes[: self.top_n]
+        return self._call_openai_api(nodes, query_bundle)
 
 
 class SafeQdrantVectorStore(QdrantVectorStore):
@@ -293,6 +335,7 @@ def _build_index() -> VectorStoreIndex:
 
 
 def insert_nodes(nodes: List[TextNode]) -> None:
+    logger.info("Inserting %d nodes into Qdrant (will trigger embedding)", len(nodes))
     index = _build_index()
     index.insert_nodes(nodes)
 
@@ -417,8 +460,8 @@ class OpenAICompatibleLLM(OpenAI):
 
 Settings.llm = OpenAICompatibleLLM(
     model=os.getenv("LLM_MODEL"),
-    api_key=os.getenv("OPENAI_API_KEY"),
-    api_base=os.getenv("OPENAI_API_BASE"),
+    api_key=llm_key,
+    api_base=llm_base,
     temperature=0.1,
     context_window=llm_context_window,
 )
