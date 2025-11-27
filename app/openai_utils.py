@@ -2,7 +2,9 @@ import os
 from functools import lru_cache
 from typing import Optional
 
-from openai import OpenAI
+from llama_index.core.llms import LLMMetadata, MessageRole
+from llama_index.llms.openai import OpenAI as LlamaOpenAI
+from openai import OpenAI as OpenAIClient
 
 
 def _env(key: str) -> Optional[str]:
@@ -59,9 +61,39 @@ def get_openai_client(
     kind: Optional[str] = None,
     *,
     base_alias_env: Optional[str] = None,
-) -> OpenAI:
+) -> OpenAIClient:
     """Shared OpenAI client builder with caching."""
     api_base, api_key = get_openai_config(kind, base_alias_env=base_alias_env)
     if not api_key:
         raise ValueError(f"Missing API key for {kind or 'OPENAI'} client")
-    return OpenAI(base_url=api_base, api_key=api_key)
+    return OpenAIClient(base_url=api_base, api_key=api_key)
+
+
+class OpenAICompatibleLLM(LlamaOpenAI):
+    """LLM wrapper that tolerates非标准 OpenAI 模型名."""
+
+    def __init__(self, *args, context_window: Optional[int] = None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._context_window_override = (
+            context_window or int(os.getenv("LLM_CONTEXT_WINDOW", "8192"))
+        )
+
+    def _tokenizer(self):
+        try:
+            return super()._tokenizer()
+        except Exception:
+            return None
+
+    @property
+    def metadata(self) -> LLMMetadata:
+        try:
+            return super().metadata
+        except Exception:
+            return LLMMetadata(
+                context_window=self._context_window_override,
+                num_output=self.max_tokens or -1,
+                is_chat_model=True,
+                is_function_calling_model=True,
+                model_name=self.model,
+                system_role=MessageRole.SYSTEM,
+            )

@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import json
 import logging
@@ -6,18 +7,22 @@ from typing import List
 
 from chonkie import TokenChunker
 from llama_index.core.schema import TextNode
-from llama_index.llms.openai import OpenAI
 
 from app.models import LLMAnalysis
-from app.openai_utils import get_openai_kwargs
+from app.openai_utils import OpenAICompatibleLLM, get_openai_kwargs
 from app.utils import extract_date_from_filename
 
 logger = logging.getLogger("uvicorn.error")
 
 
-extractor_llm = OpenAI(
+_llm_context_window = int(os.getenv("LLM_CONTEXT_WINDOW", "8192"))
+_llm_retry_attempts = int(os.getenv("LLM_MAX_RETRIES", "3"))
+_llm_retry_backoff = float(os.getenv("LLM_RETRY_BACKOFF", "1.5"))
+
+extractor_llm = OpenAICompatibleLLM(
     model=os.getenv("LLM_MODEL"),
     temperature=0.1,
+    context_window=_llm_context_window,
     **get_openai_kwargs("LLM"),
 )
 
@@ -53,17 +58,31 @@ async def analyze_document(text: str) -> LLMAnalysis:
 {context}
 ```
 """
-    try:
-        logger.debug("Analyzing document chunk len=%d", len(context))
-        response = await extractor_llm.acomplete(prompt)
-        content = getattr(response, "text", str(response)).strip()
-        content = _strip_code_fence(content)
-        data = json.loads(content)
-        logger.debug("Analyzer output keys=%s", list(data.keys()))
-        return LLMAnalysis.model_validate(data)
-    except Exception:
-        logger.exception("Analyzer failed, returning empty analysis")
-        return LLMAnalysis()
+    last_error: Exception | None = None
+    for attempt in range(1, _llm_retry_attempts + 1):
+        try:
+            logger.debug("Analyzing document chunk len=%d", len(context))
+            response = await extractor_llm.acomplete(prompt)
+            content = getattr(response, "text", str(response)).strip()
+            content = _strip_code_fence(content)
+            data = json.loads(content)
+            logger.debug("Analyzer output keys=%s", list(data.keys()))
+            return LLMAnalysis.model_validate(data)
+        except Exception as exc:
+            last_error = exc
+            if attempt >= _llm_retry_attempts:
+                logger.exception("Analyzer failed after %d attempts", attempt)
+                break
+            delay = _llm_retry_backoff * attempt
+            logger.warning(
+                "Analyzer attempt %d/%d failed: %s -- retrying in %.1fs",
+                attempt,
+                _llm_retry_attempts,
+                exc,
+                delay,
+            )
+            await asyncio.sleep(delay)
+    return LLMAnalysis()
 
 
 async def process_file(filename: str, content: str, ingest_date: str | None = None) -> List[TextNode]:

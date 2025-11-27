@@ -1,13 +1,13 @@
 import json
 import logging
 import os
+import time
 from typing import Any, Callable, List, Optional, Tuple
 from urllib.parse import urlparse, urlunparse
 
 import httpx
 from llama_index.core import QueryBundle, Settings, StorageContext, VectorStoreIndex
 from llama_index.core.embeddings import BaseEmbedding
-from llama_index.core.llms import LLMMetadata, MessageRole
 from llama_index.core.postprocessor.types import BaseNodePostprocessor
 from llama_index.core.schema import NodeWithScore, TextNode
 from llama_index.core.vector_stores import (
@@ -16,7 +16,6 @@ from llama_index.core.vector_stores import (
     MetadataFilters,
 )
 from llama_index.embeddings.openai import OpenAIEmbedding
-from llama_index.llms.openai import OpenAI
 from llama_index.vector_stores.qdrant import QdrantVectorStore
 from llama_index.vector_stores.qdrant.base import (
     DEFAULT_SPARSE_VECTOR_NAME,
@@ -27,6 +26,7 @@ from qdrant_client import QdrantClient
 from qdrant_client.http import models as qdrant_models
 
 from app.openai_utils import (
+    OpenAICompatibleLLM,
     get_openai_client,
     get_openai_config,
     get_openai_kwargs,
@@ -41,6 +41,8 @@ llm_base, llm_key = get_openai_config("LLM")
 embedding_kwargs = get_openai_kwargs("EMBEDDING")
 embedding_dim = int(os.getenv("EMBEDDING_DIM", "1536"))
 llm_context_window = int(os.getenv("LLM_CONTEXT_WINDOW", "8192"))
+EMBEDDING_MAX_RETRIES = int(os.getenv("EMBEDDING_MAX_RETRIES", "3"))
+EMBEDDING_RETRY_BACKOFF = float(os.getenv("EMBEDDING_RETRY_BACKOFF", "1.5"))
 fastembed_model_name = os.getenv(
     "FASTEMBED_SPARSE_MODEL", "Qdrant/bm42-all-minilm-l6-v2-attentions"
 )
@@ -65,6 +67,8 @@ class OpenAICompatibleEmbedding(BaseEmbedding):
         self._api_base = (api_base or "https://api.openai.com/v1").rstrip("/")
         self._dimensions = dimensions
         self._timeout = timeout
+        self._max_retries = EMBEDDING_MAX_RETRIES
+        self._retry_backoff = EMBEDDING_RETRY_BACKOFF
 
     def _headers(self) -> dict:
         headers = {"Content-Type": "application/json"}
@@ -77,14 +81,36 @@ class OpenAICompatibleEmbedding(BaseEmbedding):
         if self._dimensions:
             payload["dimensions"] = self._dimensions
         url = f"{self._api_base}/embeddings"
-        response = httpx.post(
-            url,
-            json=payload,
-            headers=self._headers(),
-            timeout=self._timeout,
-        )
-        response.raise_for_status()
-        return response.json().get("data", [])
+        last_error: Exception | None = None
+        for attempt in range(1, self._max_retries + 1):
+            try:
+                response = httpx.post(
+                    url,
+                    json=payload,
+                    headers=self._headers(),
+                    timeout=self._timeout,
+                )
+                response.raise_for_status()
+                return response.json().get("data", [])
+            except Exception as exc:
+                last_error = exc
+                if attempt >= self._max_retries:
+                    logger.error(
+                        "Embedding request failed after %d attempts: %s",
+                        attempt,
+                        exc,
+                    )
+                    raise
+                delay = self._retry_backoff * attempt
+                logger.warning(
+                    "Embedding request attempt %d/%d failed: %s -- retrying in %.1fs",
+                    attempt,
+                    self._max_retries,
+                    exc,
+                    delay,
+                )
+                time.sleep(delay)
+        raise last_error or RuntimeError("Embedding request failed")
 
     def _embedding_request(self, inputs: List[str]) -> List[List[float]]:
         data = self._send_embedding_request(inputs)
@@ -480,34 +506,6 @@ def get_collection_metrics() -> dict:
         pass
 
     return metrics
-
-
-class OpenAICompatibleLLM(OpenAI):
-    """LLM wrapper that tolerates非标准 OpenAI 模型名."""
-
-    def __init__(self, *args: Any, context_window: int = 8192, **kwargs: Any) -> None:
-        super().__init__(*args, **kwargs)
-        self._context_window_override = context_window
-
-    def _tokenizer(self):
-        try:
-            return super()._tokenizer()
-        except Exception:
-            return None
-
-    @property
-    def metadata(self) -> LLMMetadata:
-        try:
-            return super().metadata
-        except Exception:
-            return LLMMetadata(
-                context_window=self._context_window_override,
-                num_output=self.max_tokens or -1,
-                is_chat_model=True,
-                is_function_calling_model=True,
-                model_name=self.model,
-                system_role=MessageRole.SYSTEM,
-            )
 
 
 Settings.llm = OpenAICompatibleLLM(
