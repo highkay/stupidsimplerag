@@ -270,6 +270,19 @@ class SafeQdrantVectorStore(QdrantVectorStore):
             result.nodes = []
         return result
 
+    def _reinitialize_sparse_encoders(self) -> None:
+        """Override default behavior to keep FastEmbed encoders even for legacy collections."""
+        if not self.enable_hybrid:
+            return
+        if not self._user_provided_sparse_doc_fn:
+            self._sparse_doc_fn = self._build_fastembed_encoder(
+                self.fastembed_sparse_model
+            )
+        if not self._user_provided_sparse_query_fn:
+            self._sparse_query_fn = self._build_fastembed_encoder(
+                self.fastembed_sparse_model
+            )
+
 
 def _ensure_hybrid_collection(
     client: QdrantClient, collection_name: str, vector_size: int
