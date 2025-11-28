@@ -1,3 +1,4 @@
+import asyncio
 import datetime
 import hashlib
 import logging
@@ -31,6 +32,7 @@ if static_dir.exists():
     app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
 logger = logging.getLogger("uvicorn.error")
+BATCH_INGEST_CONCURRENCY = max(1, int(os.getenv("BATCH_INGEST_CONCURRENCY", "4")))
 
 
 def _cache_key(body: ChatRequest) -> str:
@@ -164,6 +166,24 @@ def _filter_nodes_by_keywords(nodes, any_set, all_set):
     return filtered
 
 
+async def _ingest_single_upload(
+    upload: UploadFile, semaphore: asyncio.Semaphore
+) -> IngestResponse:
+    async with semaphore:
+        logger.info("Batch ingest processing file=%s", upload.filename)
+        content = (await upload.read()).decode("utf-8")
+        ingest_date = _extract_upload_date(upload)
+        nodes = await process_file(upload.filename, content, ingest_date=ingest_date)
+        if nodes:
+            await asyncio.to_thread(insert_nodes, nodes)
+        logger.info(
+            "Batch ingest processed file=%s chunks=%d", upload.filename, len(nodes)
+        )
+        return IngestResponse(
+            status="ok", chunks=len(nodes), filename=upload.filename
+        )
+
+
 @app.post("/ingest", response_model=IngestResponse)
 async def ingest_api(file: UploadFile = File(...)) -> IngestResponse:
     if not (file.filename.endswith(".md") or file.filename.endswith(".txt")):
@@ -184,22 +204,23 @@ async def ingest_batch(files: List[UploadFile] = File(...)) -> List[IngestRespon
     if not files:
         raise HTTPException(status_code=400, detail="At least one file is required")
 
-    results: List[IngestResponse] = []
-    logger.info("Batch ingest start files=%d", len(files))
     for upload in files:
         if not (upload.filename.endswith(".md") or upload.filename.endswith(".txt")):
-            raise HTTPException(status_code=400, detail=f"Only .md or .txt supported: {upload.filename}")
-        content = (await upload.read()).decode("utf-8")
-        ingest_date = _extract_upload_date(upload)
-        nodes = await process_file(upload.filename, content, ingest_date=ingest_date)
-        if nodes:
-            insert_nodes(nodes)
-        logger.info(
-            "Batch ingest processed file=%s chunks=%d", upload.filename, len(nodes)
-        )
-        results.append(IngestResponse(status="ok", chunks=len(nodes), filename=upload.filename))
+            raise HTTPException(
+                status_code=400,
+                detail=f"Only .md or .txt supported: {upload.filename}",
+            )
+
+    logger.info(
+        "Batch ingest start files=%d concurrency=%d",
+        len(files),
+        BATCH_INGEST_CONCURRENCY,
+    )
+    semaphore = asyncio.Semaphore(BATCH_INGEST_CONCURRENCY)
+    tasks = [_ingest_single_upload(upload, semaphore) for upload in files]
+    results = await asyncio.gather(*tasks)
     logger.info("Batch ingest finished total_files=%d", len(results))
-    return results
+    return list(results)
 
 
 @app.post("/ingest/text", response_model=IngestResponse)

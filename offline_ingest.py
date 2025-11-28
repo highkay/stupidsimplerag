@@ -2,7 +2,7 @@ import argparse
 import logging
 import os
 from pathlib import Path
-from typing import Any, Iterable, List, Sequence, Tuple
+from typing import Any, Iterable, List, Optional, Sequence, Tuple
 
 import httpx
 
@@ -42,7 +42,12 @@ def _file_headers(path: Path) -> dict:
         return {}
 
 
-def ingest_single(client: httpx.Client, url: str, path: Path) -> Tuple[bool, str]:
+def ingest_single(
+    client: httpx.Client,
+    url: str,
+    path: Path,
+    timeout: Optional[float],
+) -> Tuple[bool, str]:
     files = {
         "file": (
             path.name,
@@ -51,7 +56,7 @@ def ingest_single(client: httpx.Client, url: str, path: Path) -> Tuple[bool, str
             _file_headers(path),
         )
     }
-    resp = client.post(url, files=files, timeout=30.0)
+    resp = client.post(url, files=files, timeout=timeout)
     if resp.status_code == 200:
         return True, resp.text
     return False, resp.text
@@ -61,6 +66,7 @@ def ingest_batch(
     client: httpx.Client,
     url: str,
     paths: List[Path],
+    timeout: Optional[float],
 ) -> Tuple[bool, str]:
     files: List[Tuple[str, Tuple[Any, ...]]] = []
     for path in paths:
@@ -75,7 +81,7 @@ def ingest_batch(
                 ),
             )
         )
-    resp = client.post(url, files=files, timeout=60.0)
+    resp = client.post(url, files=files, timeout=timeout)
     if resp.status_code == 200:
         return True, resp.text
     return False, resp.text
@@ -103,6 +109,12 @@ def main() -> None:
         help="Send multiple files per request using /ingest/batch when >1.",
     )
     parser.add_argument(
+        "--timeout",
+        type=float,
+        default=300.0,
+        help="Request timeout in seconds (set <=0 for no timeout).",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Only list files that would be ingested.",
@@ -126,11 +138,12 @@ def main() -> None:
     ingest_batch_url = f"{api_base}/ingest/batch"
     total = len(files)
     success = 0
+    timeout: Optional[float] = None if args.timeout <= 0 else args.timeout
 
     with httpx.Client() as client:
         if args.batch_size <= 1:
             for path in files:
-                ok, message = ingest_single(client, ingest_url, path)
+                ok, message = ingest_single(client, ingest_url, path, timeout)
                 if ok:
                     success += 1
                     logger.info("Ingested %s", path)
@@ -138,7 +151,7 @@ def main() -> None:
                     logger.error("Failed ingest %s: %s", path, message)
         else:
             for chunk in chunked(files, args.batch_size):
-                ok, message = ingest_batch(client, ingest_batch_url, chunk)
+                ok, message = ingest_batch(client, ingest_batch_url, chunk, timeout)
                 if ok:
                     success += len(chunk)
                     logger.info("Ingested batch (%d files)", len(chunk))
