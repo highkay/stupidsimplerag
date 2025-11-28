@@ -12,6 +12,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+from llama_index.core.schema import TextNode
 from app.core import get_collection_metrics, get_query_engine, insert_nodes
 from app.ingest import process_file
 from app.models import (
@@ -166,6 +167,18 @@ def _filter_nodes_by_keywords(nodes, any_set, all_set):
     return filtered
 
 
+async def _process_and_insert_content(
+    filename: str, content: str, ingest_date: Optional[str]
+) -> List[TextNode]:
+    """
+    Shared helper to run expensive processing & DB insert without blocking the event loop.
+    """
+    nodes = await process_file(filename, content, ingest_date=ingest_date)
+    if nodes:
+        await asyncio.to_thread(insert_nodes, nodes)
+    return nodes
+
+
 async def _ingest_single_upload(
     upload: UploadFile, semaphore: asyncio.Semaphore
 ) -> IngestResponse:
@@ -173,9 +186,9 @@ async def _ingest_single_upload(
         logger.info("Batch ingest processing file=%s", upload.filename)
         content = (await upload.read()).decode("utf-8")
         ingest_date = _extract_upload_date(upload)
-        nodes = await process_file(upload.filename, content, ingest_date=ingest_date)
-        if nodes:
-            await asyncio.to_thread(insert_nodes, nodes)
+        nodes = await _process_and_insert_content(
+            upload.filename, content, ingest_date
+        )
         logger.info(
             "Batch ingest processed file=%s chunks=%d", upload.filename, len(nodes)
         )
@@ -192,9 +205,7 @@ async def ingest_api(file: UploadFile = File(...)) -> IngestResponse:
     logger.info("Ingest single file=%s", file.filename)
     content = (await file.read()).decode("utf-8")
     ingest_date = _extract_upload_date(file)
-    nodes = await process_file(file.filename, content, ingest_date=ingest_date)
-    if nodes:
-        insert_nodes(nodes)
+    nodes = await _process_and_insert_content(file.filename, content, ingest_date)
     logger.info("Ingest complete file=%s chunks=%d", file.filename, len(nodes))
     return IngestResponse(status="ok", chunks=len(nodes), filename=file.filename)
 
@@ -233,9 +244,7 @@ async def ingest_text_api(body: TextIngestRequest) -> IngestResponse:
     date_str = now.strftime("%Y-%m-%d")
     filename = body.filename or f"inline_{now.strftime('%Y%m%d_%H%M%S')}.md"
     logger.info("Text ingest filename=%s date=%s", filename, date_str)
-    nodes = await process_file(filename, content, ingest_date=date_str)
-    if nodes:
-        insert_nodes(nodes)
+    nodes = await _process_and_insert_content(filename, content, date_str)
     logger.info("Text ingest complete filename=%s chunks=%d", filename, len(nodes))
     return IngestResponse(status="ok", chunks=len(nodes), filename=filename)
 
