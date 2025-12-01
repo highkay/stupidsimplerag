@@ -82,6 +82,15 @@ class OpenAICompatibleEmbedding(BaseEmbedding):
             payload["dimensions"] = self._dimensions
         url = f"{self._api_base}/embeddings"
         last_error: Exception | None = None
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "Embedding request model=%s url=%s batch_size=%d dim=%s first_chunk_len=%s",
+                self._model,
+                url,
+                len(inputs),
+                self._dimensions or "full",
+                len(inputs[0]) if inputs else 0,
+            )
         for attempt in range(1, self._max_retries + 1):
             try:
                 response = httpx.post(
@@ -91,7 +100,35 @@ class OpenAICompatibleEmbedding(BaseEmbedding):
                     timeout=self._timeout,
                 )
                 response.raise_for_status()
-                return response.json().get("data", [])
+                result = response.json()
+                data = result.get("data", [])
+                if logger.isEnabledFor(logging.INFO):
+                    vector_dim = 0
+                    preview = []
+                    if data:
+                        vector = data[0].get("embedding") or []
+                        vector_dim = len(vector)
+                        preview = vector[: min(len(vector), 4)]
+                    logger.info(
+                        "Embedding success model=%s batch=%d dim=%s preview=%s",
+                        self._model,
+                        len(data),
+                        vector_dim or "unknown",
+                        preview,
+                    )
+                if logger.isEnabledFor(logging.DEBUG):
+                    preview = []
+                    if data:
+                        vector = data[0].get("embedding") or []
+                        preview = vector[: min(len(vector), 8)]
+                    logger.debug(
+                        "Embedding response success attempt=%d vectors=%d usage=%s preview=%s",
+                        attempt,
+                        len(data),
+                        result.get("usage"),
+                        preview,
+                    )
+                return data
             except Exception as exc:
                 last_error = exc
                 if attempt >= self._max_retries:
@@ -219,6 +256,10 @@ class FixedDimensionEmbedding(BaseEmbedding):
 def _init_embedding_model() -> BaseEmbedding:
     model_name = os.getenv("EMBEDDING_MODEL")
     base_model: BaseEmbedding
+    if logger.isEnabledFor(logging.INFO):
+        logger.info(
+            "Initializing embedding model=%s dim=%s", model_name, embedding_dim
+        )
     try:
         base_model = OpenAIEmbedding(
             model=model_name,
@@ -238,6 +279,13 @@ def _init_embedding_model() -> BaseEmbedding:
 
 
 Settings.embed_model = _init_embedding_model()
+if logger.isEnabledFor(logging.INFO):
+    logger.info(
+        "Embedding model ready: name=%s dim=%s",
+        getattr(Settings.embed_model, "model_name", None)
+        or getattr(Settings.embed_model, "_model_name", "unknown"),
+        embedding_dim,
+    )
 
 
 class APIReranker(BaseNodePostprocessor):
@@ -440,6 +488,12 @@ def _build_qdrant_store() -> QdrantVectorStore:
     client_timeout = float(os.getenv("QDRANT_CLIENT_TIMEOUT", "10"))
 
     def _create_store(q_client: QdrantClient) -> QdrantVectorStore:
+        if logger.isEnabledFor(logging.INFO):
+            logger.info(
+                "Ensuring Qdrant hybrid collection=%s dim=%s",
+                collection,
+                embedding_dim,
+            )
         _ensure_hybrid_collection(q_client, collection, embedding_dim)
         return SafeQdrantVectorStore(
             client=q_client,
@@ -453,6 +507,8 @@ def _build_qdrant_store() -> QdrantVectorStore:
     if qdrant_url:
         qdrant_url = _append_port_if_missing(qdrant_url, port)
         try:
+            if logger.isEnabledFor(logging.INFO):
+                logger.info("Connecting to managed Qdrant url=%s", qdrant_url)
             remote_client = QdrantClient(
                 url=qdrant_url, api_key=qdrant_api_key, timeout=client_timeout
             )
@@ -471,6 +527,13 @@ def _build_qdrant_store() -> QdrantVectorStore:
     if resolved_host == "qdrant" and not running_in_container:
         resolved_host = "127.0.0.1"
 
+    if logger.isEnabledFor(logging.INFO):
+        logger.info(
+            "Connecting to Qdrant host=%s port=%s https=%s",
+            resolved_host,
+            port,
+            use_https,
+        )
     local_client = QdrantClient(
         host=resolved_host,
         port=port,
@@ -483,18 +546,35 @@ def _build_qdrant_store() -> QdrantVectorStore:
 
 vector_store = _build_qdrant_store()
 storage_context = StorageContext.from_defaults(vector_store=vector_store)
+_INDEX_CACHE: VectorStoreIndex | None = None
 
 
-def _build_index() -> VectorStoreIndex:
-    return VectorStoreIndex.from_vector_store(
-        vector_store, storage_context=storage_context
-    )
+def _get_index() -> VectorStoreIndex:
+    global _INDEX_CACHE
+    if _INDEX_CACHE is None:
+        if logger.isEnabledFor(logging.INFO):
+            logger.info("Building VectorStoreIndex with hybrid store (cached)")
+        _INDEX_CACHE = VectorStoreIndex.from_vector_store(
+            vector_store, storage_context=storage_context
+        )
+    return _INDEX_CACHE
 
 
 def insert_nodes(nodes: List[TextNode]) -> None:
+    if not nodes:
+        logger.debug("insert_nodes called with empty payload; skipping")
+        return
     logger.info("Inserting %d nodes into Qdrant (will trigger embedding)", len(nodes))
-    index = _build_index()
+    start = time.perf_counter()
+    index = _get_index()
     index.insert_nodes(nodes)
+    elapsed = time.perf_counter() - start
+    logger.debug(
+        "Qdrant insert complete collection=%s count=%d duration=%.2fs",
+        getattr(vector_store, "collection_name", "unknown"),
+        len(nodes),
+        elapsed,
+    )
 
 
 def _date_str_to_int(value: Optional[str]) -> Optional[int]:
@@ -543,7 +623,7 @@ def get_query_engine(
     if filter_items:
         filters = MetadataFilters(filters=filter_items)
 
-    index = _build_index()
+    index = _get_index()
     top_k = int(os.getenv("TOP_K_RETRIEVAL", "100"))
     rerank_top_n = int(os.getenv("TOP_N_RERANK", "20"))
     sparse_top_k = int(os.getenv("SPARSE_TOP_K", "12"))

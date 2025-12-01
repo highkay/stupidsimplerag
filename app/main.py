@@ -3,6 +3,7 @@ import datetime
 import hashlib
 import logging
 import os
+import time
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -34,6 +35,8 @@ if static_dir.exists():
 
 logger = logging.getLogger("uvicorn.error")
 BATCH_INGEST_CONCURRENCY = max(1, int(os.getenv("BATCH_INGEST_CONCURRENCY", "4")))
+INSERT_MAX_RETRIES = max(1, int(os.getenv("INGEST_INSERT_MAX_RETRIES", "3")))
+INSERT_RETRY_BACKOFF = float(os.getenv("INGEST_INSERT_RETRY_BACKOFF", "2.0"))
 
 
 def _cache_key(body: ChatRequest) -> str:
@@ -100,6 +103,23 @@ def _extract_upload_date(upload: UploadFile) -> Optional[str]:
             upload.filename,
         )
     return date_str
+
+
+def _decode_upload_bytes(raw_bytes: Optional[bytes], filename: str) -> str:
+    data = raw_bytes or b""
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        logger.error(
+            "Failed to decode upload file=%s byte_len=%d: %s",
+            filename,
+            len(data),
+            exc,
+        )
+        raise HTTPException(
+            status_code=400,
+            detail=f"File {filename} must be UTF-8 encoded before uploading.",
+        ) from exc
 
 
 def _parse_keywords(raw: Optional[str]) -> Optional[List[str]]:
@@ -173,10 +193,78 @@ async def _process_and_insert_content(
     """
     Shared helper to run expensive processing & DB insert without blocking the event loop.
     """
+    content_len = len(content)
+    logger.debug(
+        "Begin ingest pipeline file=%s ingest_date=%s content_len=%d",
+        filename,
+        ingest_date,
+        content_len,
+    )
+    start = time.perf_counter()
     nodes = await process_file(filename, content, ingest_date=ingest_date)
+    processing_elapsed = time.perf_counter() - start
+    logger.debug(
+        "process_file finished file=%s nodes=%d duration=%.2fs",
+        filename,
+        len(nodes),
+        processing_elapsed,
+    )
     if nodes:
-        await asyncio.to_thread(insert_nodes, nodes)
+        insert_start = time.perf_counter()
+        await _insert_nodes_with_retry(nodes)
+        insert_elapsed = time.perf_counter() - insert_start
+        logger.debug(
+            "Inserted nodes file=%s count=%d duration=%.2fs",
+            filename,
+            len(nodes),
+            insert_elapsed,
+        )
+    else:
+        logger.warning(
+            "Skipping insert for file=%s because no nodes were produced",
+            filename,
+        )
+    total_elapsed = time.perf_counter() - start
+    logger.debug(
+        "Ingest pipeline finished file=%s total_duration=%.2fs",
+        filename,
+        total_elapsed,
+    )
     return nodes
+
+
+async def _insert_nodes_with_retry(nodes: List[TextNode]) -> None:
+    if not nodes:
+        return
+    last_error: Exception | None = None
+    for attempt in range(1, INSERT_MAX_RETRIES + 1):
+        try:
+            await asyncio.to_thread(insert_nodes, nodes)
+            if attempt > 1:
+                logger.info(
+                    "insert_nodes succeeded after retry attempt=%d node_count=%d",
+                    attempt,
+                    len(nodes),
+                )
+            return
+        except Exception as exc:
+            last_error = exc
+            if attempt >= INSERT_MAX_RETRIES:
+                logger.exception(
+                    "insert_nodes failed after %d attempts", INSERT_MAX_RETRIES
+                )
+                raise
+            delay = INSERT_RETRY_BACKOFF * attempt
+            logger.warning(
+                "insert_nodes attempt %d/%d failed: %s -- retrying in %.1fs",
+                attempt,
+                INSERT_MAX_RETRIES,
+                exc,
+                delay,
+            )
+            await asyncio.sleep(delay)
+    if last_error:
+        raise last_error
 
 
 async def _ingest_single_upload(
@@ -184,7 +272,13 @@ async def _ingest_single_upload(
 ) -> IngestResponse:
     async with semaphore:
         logger.info("Batch ingest processing file=%s", upload.filename)
-        content = (await upload.read()).decode("utf-8")
+        raw_bytes = await upload.read()
+        logger.debug(
+            "Read batch upload file=%s bytes=%d",
+            upload.filename,
+            len(raw_bytes or b""),
+        )
+        content = _decode_upload_bytes(raw_bytes, upload.filename)
         ingest_date = _extract_upload_date(upload)
         nodes = await _process_and_insert_content(
             upload.filename, content, ingest_date
@@ -203,7 +297,10 @@ async def ingest_api(file: UploadFile = File(...)) -> IngestResponse:
         raise HTTPException(status_code=400, detail="Only .md or .txt supported")
 
     logger.info("Ingest single file=%s", file.filename)
-    content = (await file.read()).decode("utf-8")
+    raw_bytes = await file.read()
+    byte_len = len(raw_bytes or b"")
+    logger.debug("Received upload file=%s size_bytes=%d", file.filename, byte_len)
+    content = _decode_upload_bytes(raw_bytes, file.filename)
     ingest_date = _extract_upload_date(file)
     nodes = await _process_and_insert_content(file.filename, content, ingest_date)
     logger.info("Ingest complete file=%s chunks=%d", file.filename, len(nodes))
@@ -229,9 +326,36 @@ async def ingest_batch(files: List[UploadFile] = File(...)) -> List[IngestRespon
     )
     semaphore = asyncio.Semaphore(BATCH_INGEST_CONCURRENCY)
     tasks = [_ingest_single_upload(upload, semaphore) for upload in files]
-    results = await asyncio.gather(*tasks)
-    logger.info("Batch ingest finished total_files=%d", len(results))
-    return list(results)
+    raw_results = await asyncio.gather(*tasks, return_exceptions=True)
+    responses: List[IngestResponse] = []
+    success_count = 0
+    for upload, outcome in zip(files, raw_results):
+        if isinstance(outcome, Exception):
+            detail = getattr(outcome, "detail", str(outcome))
+            logger.error(
+                "Batch ingest failed file=%s error=%s",
+                upload.filename,
+                detail,
+            )
+            responses.append(
+                IngestResponse(
+                    status="error",
+                    chunks=0,
+                    filename=upload.filename,
+                    error=str(detail),
+                )
+            )
+        else:
+            responses.append(outcome)
+            if outcome.status.lower() == "ok":
+                success_count += 1
+    logger.info(
+        "Batch ingest finished total_files=%d succeeded=%d failed=%d",
+        len(responses),
+        success_count,
+        len(responses) - success_count,
+    )
+    return responses
 
 
 @app.post("/ingest/text", response_model=IngestResponse)
@@ -244,6 +368,12 @@ async def ingest_text_api(body: TextIngestRequest) -> IngestResponse:
     date_str = now.strftime("%Y-%m-%d")
     filename = body.filename or f"inline_{now.strftime('%Y%m%d_%H%M%S')}.md"
     logger.info("Text ingest filename=%s date=%s", filename, date_str)
+    logger.debug(
+        "Text ingest filename=%s raw_len=%d stripped_len=%d",
+        filename,
+        len(body.content),
+        len(content),
+    )
     nodes = await _process_and_insert_content(filename, content, date_str)
     logger.info("Text ingest complete filename=%s chunks=%d", filename, len(nodes))
     return IngestResponse(status="ok", chunks=len(nodes), filename=filename)

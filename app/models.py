@@ -38,6 +38,7 @@ class IngestResponse(BaseModel):
     status: str
     chunks: int
     filename: str
+    error: Optional[str] = None
 
 
 class TextIngestRequest(BaseModel):

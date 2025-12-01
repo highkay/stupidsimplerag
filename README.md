@@ -50,6 +50,7 @@ curl -X POST http://localhost:8000/chat -H "Content-Type: application/json" \
 - **Qdrant**：`QDRANT_HOST`, `QDRANT_PORT`, `QDRANT_URL`, `QDRANT_API_KEY`, `COLLECTION_NAME`, `QDRANT_HTTPS`。如使用托管集群，只需填 URL + API Key。
 - **策略**：`TOP_K_RETRIEVAL`, `TOP_N_RERANK`, `FINAL_TOP_K`, `TIME_DECAY_RATE`, `SPARSE_TOP_K`。可按业务调优 recall / latency。
 - **FastEmbed 缓存**：`FASTEMBED_CACHE_PATH`, `FASTEMBED_SPARSE_MODEL`；`preload_models.py` 可提前把 BM42 模型下载到镜像。
+- **日志**：统一使用 `LOG_LEVEL` 控制（默认 INFO），无需额外的模块级配置。设置为 `debug` 可查看入库 LLM/Embedding 细节。
 
 ## 本地开发
 
@@ -66,6 +67,7 @@ curl -X POST http://localhost:8000/chat -H "Content-Type: application/json" -d '
 - 若调整 `EMBEDDING_DIM`，请清空 `qdrant_data` 以重新建集合。
 - 连接托管 Qdrant 时可用 `curl -X GET <QDRANT_URL>` + `api-key` 快速做健康检查。
 - 离线批量导入：`python offline_ingest.py --dir ./docs --api-base http://127.0.0.1:8000 --batch-size 4`，递归读取 `.md/.txt` 并调用 `/ingest` 或 `/ingest/batch`，可用 `--dry-run` 预览。
+- 重置 Qdrant 集合：`python reset_qdrant.py -y` 会按 `.env` 中的 `COLLECTION_NAME` 与 `EMBEDDING_DIM` 删除并重建集合（危险操作，务必确认目标环境）。
 
 ## 了解更多
 
