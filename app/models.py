@@ -39,6 +39,7 @@ class IngestResponse(BaseModel):
     chunks: int
     filename: str
     error: Optional[str] = None
+    doc_hash: Optional[str] = None
 
 
 class TextIngestRequest(BaseModel):

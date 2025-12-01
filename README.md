@@ -40,7 +40,7 @@ curl -X POST http://localhost:8000/chat -H "Content-Type: application/json" \
 ## 工作流速览
 
 1. **预处理**：Chonkie 按 token 切分 → LLM 一次性生成 `summary/table_narrative/keywords` → 生成富语义 header 并拼接到每个 chunk。
-2. **入库**：TextNode 携带 `filename/date/keywords/original_text` 写入 Qdrant 混合集合（Dense + FastEmbed BM42 Sparse），节点 ID 由 `filename + chunk_id` 哈希保证幂等。
+2. **入库**：TextNode 携带 `filename/date/keywords/original_text/doc_hash` 写入 Qdrant 混合集合（Dense + FastEmbed BM42 Sparse），`doc_hash=sha256(content)` 用于跳过重复入库；节点 ID 由 `doc_hash + chunk_id` 哈希保证幂等/复用。
 3. **查询**：LlamaIndex QueryEngine 走 hybrid 检索（Top-K=100，可选时间过滤）→ API rerank Top-N=20 → `apply_time_decay` 线性衰减旧文档分数 → 保留 FINAL_TOP_K 命中。
 4. **服务层**：FastAPI + TTLCache 以 `query+date_range` 为 key 做 1 小时语义缓存；Markdown-only 入库保证运行时简单可靠。
 

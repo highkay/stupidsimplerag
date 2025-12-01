@@ -456,6 +456,11 @@ def _ensure_hybrid_collection(
                 )
             },
         )
+    _ensure_payload_indexes(client, collection_name)
+
+
+def _ensure_payload_indexes(client: QdrantClient, collection_name: str) -> None:
+    """Create payload indexes used by filters (idempotent if they already exist)."""
     try:
         client.create_payload_index(
             collection_name=collection_name,
@@ -463,7 +468,14 @@ def _ensure_hybrid_collection(
             field_schema=qdrant_models.PayloadSchemaType.INTEGER,
         )
     except Exception:
-        # 索引已存在或集群不支持重复创建时忽略
+        pass
+    try:
+        client.create_payload_index(
+            collection_name=collection_name,
+            field_name="doc_hash",
+            field_schema=qdrant_models.PayloadSchemaType.KEYWORD,
+        )
+    except Exception:
         pass
 
 
@@ -674,3 +686,47 @@ Settings.llm = OpenAICompatibleLLM(
     temperature=0.1,
     context_window=llm_context_window,
 )
+
+
+def doc_exists(doc_hash: str) -> bool:
+    """Return True if collection already has a payload with the given doc_hash."""
+    if not doc_hash:
+        return False
+    client = getattr(vector_store, "client", None)
+    collection = getattr(vector_store, "collection_name", None)
+    if not client or not collection:
+        return False
+    _ensure_payload_indexes(client, collection)
+    try:
+        flt = qdrant_models.Filter(
+            must=[
+                qdrant_models.FieldCondition(
+                    key="doc_hash", match=qdrant_models.MatchValue(value=doc_hash)
+                )
+            ]
+        )
+        result = client.scroll(
+            collection_name=collection,
+            scroll_filter=flt,
+            with_payload=False,
+            limit=1,
+        )
+        points = result[0] if isinstance(result, (list, tuple)) else result
+        return bool(points)
+    except Exception as exc:
+        if "Index required" in str(exc):
+            try:
+                _ensure_payload_indexes(client, collection)
+                result = client.scroll(
+                    collection_name=collection,
+                    scroll_filter=flt,
+                    with_payload=False,
+                    limit=1,
+                )
+                points = result[0] if isinstance(result, (list, tuple)) else result
+                return bool(points)
+            except Exception as inner_exc:
+                logger.warning("doc_exists retry failed: %s", inner_exc)
+                return False
+        logger.warning("doc_exists check failed: %s", exc)
+        return False

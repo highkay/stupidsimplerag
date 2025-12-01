@@ -14,8 +14,8 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from llama_index.core.schema import TextNode
-from app.core import get_collection_metrics, get_query_engine, insert_nodes
-from app.ingest import process_file
+from app.core import doc_exists, get_collection_metrics, get_query_engine, insert_nodes
+from app.ingest import compute_doc_hash, process_file
 from app.models import (
     ChatRequest,
     ChatResponse,
@@ -189,19 +189,28 @@ def _filter_nodes_by_keywords(nodes, any_set, all_set):
 
 async def _process_and_insert_content(
     filename: str, content: str, ingest_date: Optional[str]
-) -> List[TextNode]:
+) -> tuple[List[TextNode], bool, str]:
     """
     Shared helper to run expensive processing & DB insert without blocking the event loop.
     """
     content_len = len(content)
+    doc_hash = compute_doc_hash(content)
     logger.debug(
-        "Begin ingest pipeline file=%s ingest_date=%s content_len=%d",
+        "Begin ingest pipeline file=%s ingest_date=%s content_len=%d doc_hash=%s",
         filename,
         ingest_date,
         content_len,
+        doc_hash,
     )
+    if doc_exists(doc_hash):
+        logger.info(
+            "Skipping ingest for file=%s doc_hash=%s (already exists)", filename, doc_hash
+        )
+        return [], True, doc_hash
     start = time.perf_counter()
-    nodes = await process_file(filename, content, ingest_date=ingest_date)
+    nodes = await process_file(
+        filename, content, ingest_date=ingest_date, doc_hash=doc_hash
+    )
     processing_elapsed = time.perf_counter() - start
     logger.debug(
         "process_file finished file=%s nodes=%d duration=%.2fs",
@@ -230,7 +239,7 @@ async def _process_and_insert_content(
         filename,
         total_elapsed,
     )
-    return nodes
+    return nodes, False, doc_hash
 
 
 async def _insert_nodes_with_retry(nodes: List[TextNode]) -> None:
@@ -280,14 +289,21 @@ async def _ingest_single_upload(
         )
         content = _decode_upload_bytes(raw_bytes, upload.filename)
         ingest_date = _extract_upload_date(upload)
-        nodes = await _process_and_insert_content(
+        nodes, skipped, doc_hash = await _process_and_insert_content(
             upload.filename, content, ingest_date
         )
+        status = "skipped" if skipped else "ok"
         logger.info(
-            "Batch ingest processed file=%s chunks=%d", upload.filename, len(nodes)
+            "Batch ingest processed file=%s status=%s chunks=%d",
+            upload.filename,
+            status,
+            len(nodes),
         )
         return IngestResponse(
-            status="ok", chunks=len(nodes), filename=upload.filename
+            status=status,
+            chunks=len(nodes),
+            filename=upload.filename,
+            doc_hash=doc_hash,
         )
 
 
@@ -302,9 +318,19 @@ async def ingest_api(file: UploadFile = File(...)) -> IngestResponse:
     logger.debug("Received upload file=%s size_bytes=%d", file.filename, byte_len)
     content = _decode_upload_bytes(raw_bytes, file.filename)
     ingest_date = _extract_upload_date(file)
-    nodes = await _process_and_insert_content(file.filename, content, ingest_date)
-    logger.info("Ingest complete file=%s chunks=%d", file.filename, len(nodes))
-    return IngestResponse(status="ok", chunks=len(nodes), filename=file.filename)
+    nodes, skipped, doc_hash = await _process_and_insert_content(
+        file.filename, content, ingest_date
+    )
+    status = "skipped" if skipped else "ok"
+    logger.info(
+        "Ingest complete file=%s status=%s chunks=%d",
+        file.filename,
+        status,
+        len(nodes),
+    )
+    return IngestResponse(
+        status=status, chunks=len(nodes), filename=file.filename, doc_hash=doc_hash
+    )
 
 
 @app.post("/ingest/batch", response_model=List[IngestResponse])
@@ -374,9 +400,19 @@ async def ingest_text_api(body: TextIngestRequest) -> IngestResponse:
         len(body.content),
         len(content),
     )
-    nodes = await _process_and_insert_content(filename, content, date_str)
-    logger.info("Text ingest complete filename=%s chunks=%d", filename, len(nodes))
-    return IngestResponse(status="ok", chunks=len(nodes), filename=filename)
+    nodes, skipped, doc_hash = await _process_and_insert_content(
+        filename, content, date_str
+    )
+    status = "skipped" if skipped else "ok"
+    logger.info(
+        "Text ingest complete filename=%s status=%s chunks=%d",
+        filename,
+        status,
+        len(nodes),
+    )
+    return IngestResponse(
+        status=status, chunks=len(nodes), filename=filename, doc_hash=doc_hash
+    )
 
 
 @app.post("/chat", response_model=ChatResponse)

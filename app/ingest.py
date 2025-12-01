@@ -14,6 +14,8 @@ from app.openai_utils import OpenAICompatibleLLM, get_openai_kwargs
 from app.utils import extract_date_from_filename
 
 logger = logging.getLogger(__name__)
+def compute_doc_hash(content: str) -> str:
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
 
 _llm_context_window = int(os.getenv("LLM_CONTEXT_WINDOW", "8192"))
@@ -122,7 +124,12 @@ async def analyze_document(text: str) -> LLMAnalysis:
     return LLMAnalysis()
 
 
-async def process_file(filename: str, content: str, ingest_date: str | None = None) -> List[TextNode]:
+async def process_file(
+    filename: str,
+    content: str,
+    ingest_date: str | None = None,
+    doc_hash: str | None = None,
+) -> List[TextNode]:
     content_length = len(content)
     extracted_date = extract_date_from_filename(filename)
     if ingest_date:
@@ -212,12 +219,14 @@ async def process_file(filename: str, content: str, ingest_date: str | None = No
                 "filename": filename,
                 "date": meta_date,
                 "date_numeric": meta_date_numeric,
+                "doc_hash": doc_hash,
                 "keywords": keywords_str,
                 "keyword_list": keywords,
                 "original_text": chunk_text,
             },
         )
-        node.id_ = hashlib.md5(f"{filename}_{idx}".encode()).hexdigest()
+        hash_base = doc_hash or filename
+        node.id_ = hashlib.md5(f"{hash_base}_{idx}".encode()).hexdigest()
         nodes.append(node)
     if nodes:
         avg_len = total_chars / len(nodes)
