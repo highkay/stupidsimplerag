@@ -6,6 +6,7 @@ from typing import Any, Callable, List, Optional, Tuple
 from urllib.parse import urlparse, urlunparse
 
 import httpx
+from pydantic import Field, PrivateAttr
 from llama_index.core import QueryBundle, Settings, StorageContext, VectorStoreIndex
 from llama_index.core.embeddings import BaseEmbedding
 from llama_index.core.postprocessor.types import BaseNodePostprocessor
@@ -290,18 +291,16 @@ if logger.isEnabledFor(logging.INFO):
 
 class APIReranker(BaseNodePostprocessor):
     """Single OpenAI-compatible reranker implementation."""
+    top_n: int = Field(default=10, description="Number of nodes to return.")
+    model: Optional[str] = Field(default=None, description="Reranking model name.")
+    _client: Any = PrivateAttr()
 
     def __init__(self, top_n: int = 10):
-        logger.info("APIReranker.__init__ called with top_n=%s", top_n)
-        logger.info("APIReranker model=%s", os.getenv("RERANK_MODEL"))
-        try:
-            super().__init__()
-            logger.info("APIReranker super().__init__() succeeded")
-        except Exception as e:
-            logger.error("APIReranker super().__init__() failed: %s", e)
-            raise
-        self.top_n = top_n
-        self.model = os.getenv("RERANK_MODEL")
+        model_name = os.getenv("RERANK_MODEL")
+        super().__init__(top_n=top_n, model=model_name)
+
+        logger.info("APIReranker initialized with top_n=%s model=%s", top_n, model_name)
+
         self._client = None
         try:
             self._client = get_openai_client("RERANK", base_alias_env="RERANK_API_URL")
