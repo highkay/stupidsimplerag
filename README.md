@@ -15,14 +15,84 @@ docker-compose up -d --build
 
 ## HTTP API 一览
 
-| Endpoint | 用途 | 请求格式 | 说明 |
+| Endpoint | Method | 载荷类型 | 用途 |
 | --- | --- | --- | --- |
-| `POST /ingest` | 单文件入库 | `file=@xxx.md/.txt` (multipart) | 支持 Markdown/TXT，上传后自动切分 + 富语义头部注入。 |
-| `POST /ingest/batch` | 批量入库 | 多个 `files=@*.md/.txt` 字段 | 返回 JSON 数组，结构与 `/ingest` 相同。 |
-| `POST /ingest/text` | 在线文本入库 | `{"content":"...","filename":"可选"}` | 直接推送 Markdown/TXT 文本，日期使用当前 UTC。 |
-| `POST /chat` | 检索 + 生成 | `{"query":"…","start_date":"YYYY-MM-DD","end_date":"YYYY-MM-DD"}` | filter 字段可选，响应遵循 `ChatResponse`/`SourceItem`。 |
+| `/ingest` | `POST` | `multipart/form-data` | 单文件入库，自动切分并生成富语义头部。 |
+| `/ingest/batch` | `POST` | `multipart/form-data` | 批量入库，支持混合成功与部分失败的反馈。 |
+| `/ingest/text` | `POST` | `application/json` | 直接推送 Markdown/TXT 字符串。 |
+| `/chat` | `POST` | `application/json` | 检索 + 生成，支持多种过滤器。 |
 
-> 文件名、关键词、时间范围都会被映射到 Qdrant 元数据过滤；返回的 `sources` 会附带 `filename/date/score/keywords/text` 方便外部前端直接渲染。
+每个入库请求都会返回 `IngestResponse`（或其数组），包含入库状态与 `doc_hash`，方便客户端判断幂等。检索响应遵循 `ChatResponse`/`SourceItem`，附带必要的元数据供前端展示。
+
+### `POST /ingest`（单文件入库）
+
+- **字段**：`file`（必填），值为 `.md`/`.txt` 文件；编码需为 UTF-8。
+- **可选 Header**：`X-File-Mtime`，可使用 Unix 时间戳（秒/ms）或 ISO8601 字符串；若提供则作为该文档的业务日期写入元数据。
+- **响应 (`IngestResponse`)**
+
+```json
+{
+  "status": "ok | skipped",
+  "chunks": 12,
+  "filename": "20250228_NVIDIA_Report.md",
+  "doc_hash": "b9c8e4...",
+  "error": null
+}
+```
+
+`status=skipped` 代表同一份文档（按 `doc_hash`）已存在，本次不会重复入库。
+
+### `POST /ingest/batch`（批量入库）
+
+- **字段**：重复添加 `files=@*.md` 或 `files=@*.txt`。
+- **可选 Header**：每个文件都可以附带 `X-File-Mtime`。
+- **响应**：`[IngestResponse, ...]`。出错的文件会返回 `status="error"` 与 `error` 字段，成功的文件与单文件版本一致。
+- **并发**：受 `BATCH_INGEST_CONCURRENCY`（默认 4）控制，日志会记录每个文件的插入状态。
+
+### `POST /ingest/text`（在线文本入库）
+
+- **请求体**
+
+```json
+{
+  "content": "# 文档正文…",          // 必填，Markdown 或纯文本
+  "filename": "optional_name.md"    // 选填，未提供则自动生成
+}
+```
+
+- **行为**：使用当前 UTC 日期写入 `date` 元数据，并复用同一套去重/切分/插入逻辑。
+- **响应**：`IngestResponse`。
+
+### `POST /chat`（检索 + 生成）
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `query` | `string` | 是 | 用户问题，纯文本。 |
+| `start_date` | `YYYY-MM-DD` | 否 | 起始日期（包含），用于 Qdrant 元数据过滤。 |
+| `end_date` | `YYYY-MM-DD` | 否 | 结束日期（包含）。 |
+| `filename` | `string` | 否 | 精确文件名过滤。 |
+| `filename_contains` | `string` | 否 | 对文件名做大小写不敏感的包含匹配。 |
+| `keywords_any` | `string[]` | 否 | 仅返回命中任意关键词的切片。 |
+| `keywords_all` | `string[]` | 否 | 仅返回同时覆盖所有关键词的切片。 |
+
+- **响应 (`ChatResponse`)**
+
+```json
+{
+  "answer": "LLM 生成的回答",
+  "sources": [
+    {
+      "filename": "20250228_NVIDIA_Report.md",
+      "date": "2025-02-28",
+      "score": 0.8431,
+      "keywords": "NVDA,英伟达,GPU",
+      "text": "原始文档切片前 200 字..."
+    }
+  ]
+}
+```
+
+返回结果会先经过 Qdrant 混合检索 + API Rerank，再套用 `keywords_*` 过滤和 `apply_time_decay`；`FINAL_TOP_K` 控制最终 `sources` 数量，TTL 缓存以 `query + date/filename/keyword` 组合为键缓存 1 小时。
 
 ### 示例
 
