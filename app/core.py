@@ -292,12 +292,20 @@ class APIReranker(BaseNodePostprocessor):
     """Single OpenAI-compatible reranker implementation."""
 
     def __init__(self, top_n: int = 10):
-        super().__init__(top_n=top_n)
+        logger.info("APIReranker.__init__ called with top_n=%s", top_n)
+        logger.info("APIReranker model=%s", os.getenv("RERANK_MODEL"))
+        try:
+            super().__init__()
+            logger.info("APIReranker super().__init__() succeeded")
+        except Exception as e:
+            logger.error("APIReranker super().__init__() failed: %s", e)
+            raise
         self.top_n = top_n
         self.model = os.getenv("RERANK_MODEL")
         self._client = None
         try:
             self._client = get_openai_client("RERANK", base_alias_env="RERANK_API_URL")
+            logger.info("APIReranker client init succeeded")
         except Exception as exc:
             logger.warning("Rerank disabled: failed to init OpenAI client (%s)", exc)
             self._client = None
@@ -637,8 +645,12 @@ def get_query_engine(
 
     index = _get_index()
     top_k = int(os.getenv("TOP_K_RETRIEVAL", "100"))
-    rerank_top_n = int(os.getenv("TOP_N_RERANK", "20"))
+    raw_rerank_n = os.getenv("TOP_N_RERANK", "20")
+    logger.info("get_query_engine: raw TOP_N_RERANK env=%s", raw_rerank_n)
+    rerank_top_n = int(raw_rerank_n)
+    logger.info("get_query_engine: parsed rerank_top_n=%s", rerank_top_n)
     sparse_top_k = int(os.getenv("SPARSE_TOP_K", "12"))
+    logger.info("Creating query_engine with APIReranker(top_n=%s)", rerank_top_n)
     return index.as_query_engine(
         similarity_top_k=top_k,
         vector_store_query_mode="hybrid",
