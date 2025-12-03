@@ -301,7 +301,7 @@ class APIReranker(BaseNodePostprocessor):
     return_documents: bool = Field(
         default=False, description="Whether to ask API to return documents."
     )
-    timeout: float = Field(default=60.0, description="Request timeout in seconds.")
+    timeout: float = Field(default=180.0, description="Request timeout in seconds.")
     _api_key: Optional[str] = PrivateAttr()
     _client: Any = PrivateAttr()
     _base_url: Optional[str] = PrivateAttr()
@@ -318,7 +318,7 @@ class APIReranker(BaseNodePostprocessor):
         raw_url = os.getenv("RERANK_API_URL") or os.getenv("RERANK_API_BASE")
         resolved_base = self._normalize_base_url(raw_url)
         resolved_url = f"{resolved_base}/chat/completions" if resolved_base else None
-        resolved_timeout = timeout or float(os.getenv("RERANK_TIMEOUT", "60"))
+        resolved_timeout = timeout or float(os.getenv("RERANK_TIMEOUT", "180"))
         resolved_return_docs = (
             return_documents
             if return_documents is not None
