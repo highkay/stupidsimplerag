@@ -116,7 +116,7 @@ curl -X POST http://localhost:8000/chat -H "Content-Type: application/json" \
 
 ## 关键配置 (.env)
 
-- **LLM / Embedding / Rerank**：`LLM_MODEL`, `OPENAI_API_KEY`, `EMBEDDING_MODEL`, `EMBEDDING_DIM`, `RERANK_API_URL` 等；默认遵循 OpenAI 兼容协议，可指向 DeepSeek、SiliconFlow。
+- **LLM / Embedding / Rerank**：`LLM_MODEL`, `OPENAI_API_KEY`, `EMBEDDING_MODEL`, `EMBEDDING_DIM`, `RERANK_API_URL`（填 OpenAI 兼容基础地址，走 `/v1/chat/completions`，如 `https://api.siliconflow.cn/v1` 或 HuggingFace OpenAI Proxy），`RERANK_MODEL`（推荐 `Qwen/Qwen3-Reranker-4B`）。默认遵循 OpenAI 兼容协议。
 - **Qdrant**：`QDRANT_HOST`, `QDRANT_PORT`, `QDRANT_URL`, `QDRANT_API_KEY`, `COLLECTION_NAME`, `QDRANT_HTTPS`。如使用托管集群，只需填 URL + API Key。
 - **策略**：`TOP_K_RETRIEVAL`, `TOP_N_RERANK`, `FINAL_TOP_K`, `TIME_DECAY_RATE`, `SPARSE_TOP_K`。可按业务调优 recall / latency。
 - **FastEmbed 缓存**：`FASTEMBED_CACHE_PATH`, `FASTEMBED_SPARSE_MODEL`；`preload_models.py` 可提前把 BM42 模型下载到镜像。

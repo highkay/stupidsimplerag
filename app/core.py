@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import re
 import time
 from typing import Any, Callable, List, Optional, Tuple
 from urllib.parse import urlparse, urlunparse
@@ -23,12 +24,12 @@ from llama_index.vector_stores.qdrant.base import (
     DEFAULT_SPARSE_VECTOR_NAME_OLD,
 )
 from llama_index.vector_stores.qdrant.utils import fastembed_sparse_encoder
+from openai import OpenAI
 from qdrant_client import QdrantClient
 from qdrant_client.http import models as qdrant_models
 
 from app.openai_utils import (
     OpenAICompatibleLLM,
-    get_openai_client,
     get_openai_config,
     get_openai_kwargs,
 )
@@ -290,26 +291,91 @@ if logger.isEnabledFor(logging.INFO):
 
 
 class APIReranker(BaseNodePostprocessor):
-    """Single OpenAI-compatible reranker implementation."""
+    """HTTP reranker that calls standard OpenAI chat completion endpoints."""
+
     top_n: int = Field(default=10, description="Number of nodes to return.")
     model: Optional[str] = Field(default=None, description="Reranking model name.")
+    api_url: Optional[str] = Field(
+        default=None, description="Full rerank endpoint, e.g. https://host/v1/rerank"
+    )
+    return_documents: bool = Field(
+        default=False, description="Whether to ask API to return documents."
+    )
+    timeout: float = Field(default=60.0, description="Request timeout in seconds.")
+    _api_key: Optional[str] = PrivateAttr()
     _client: Any = PrivateAttr()
+    _base_url: Optional[str] = PrivateAttr()
 
-    def __init__(self, top_n: int = 10):
+    def __init__(
+        self,
+        top_n: int = 10,
+        *,
+        timeout: Optional[float] = None,
+        return_documents: Optional[bool] = None,
+    ):
         model_name = os.getenv("RERANK_MODEL")
-        super().__init__(top_n=top_n, model=model_name)
+        api_key = os.getenv("RERANK_API_KEY") or os.getenv("OPENAI_API_KEY")
+        raw_url = os.getenv("RERANK_API_URL") or os.getenv("RERANK_API_BASE")
+        resolved_base = self._normalize_base_url(raw_url)
+        resolved_url = f"{resolved_base}/chat/completions" if resolved_base else None
+        resolved_timeout = timeout or float(os.getenv("RERANK_TIMEOUT", "60"))
+        resolved_return_docs = (
+            return_documents
+            if return_documents is not None
+            else os.getenv("RERANK_RETURN_DOCUMENTS", "false").lower() == "true"
+        )
 
-        logger.info("APIReranker initialized with top_n=%s model=%s", top_n, model_name)
+        super().__init__(
+            top_n=top_n,
+            model=model_name,
+            api_url=resolved_url,
+            return_documents=resolved_return_docs,
+            timeout=resolved_timeout,
+        )
 
-        self._client = None
+        self._api_key = api_key
+        self._base_url = resolved_base or os.getenv("OPENAI_API_BASE")
+
         try:
-            self._client = get_openai_client("RERANK", base_alias_env="RERANK_API_URL")
-            logger.info("APIReranker client init succeeded")
+            self._client = OpenAI(
+                api_key=self._api_key,
+                base_url=self._base_url,
+                timeout=self.timeout,
+            )
+            logger.info(
+                "APIReranker ready openai-style base=%s endpoint=%s top_n=%s model=%s timeout=%ss",
+                self._base_url,
+                self.api_url,
+                top_n,
+                model_name,
+                self.timeout,
+            )
         except Exception as exc:
             logger.warning("Rerank disabled: failed to init OpenAI client (%s)", exc)
             self._client = None
 
-    def _call_openai_api(
+    @staticmethod
+    def _normalize_base_url(raw_url: Optional[str]) -> str:
+        """Normalize any given URL to an OpenAI-compatible base without the /rerank suffix."""
+        fallback = os.getenv("OPENAI_API_BASE", "https://api.openai.com/v1")
+        if raw_url:
+            base = raw_url.strip()
+        else:
+            base = fallback
+        if not base:
+            base = fallback
+        base = base.rstrip("/")
+        lowered = base.lower()
+        for suffix in ("/v1/rerank", "/rerank"):
+            if lowered.endswith(suffix):
+                base = base[: -len(suffix)]
+                base = base.rstrip("/")
+                lowered = base.lower()
+        if not base.lower().endswith("/v1"):
+            base = f"{base}/v1"
+        return base
+
+    def _call_rerank_api(
         self,
         nodes: List[NodeWithScore],
         query_bundle: QueryBundle,
@@ -317,58 +383,29 @@ class APIReranker(BaseNodePostprocessor):
         if not nodes or not self._client or not self.model:
             return nodes[: self.top_n]
 
-        documents = []
-        for idx, node in enumerate(nodes):
-            text = node.node.get_content()
-            documents.append({"index": idx, "text": text})
-
-        doc_prompt_lines = [
-            f"Query: {query_bundle.query_str}",
-            "Documents:",
-        ]
-        for doc in documents:
-            snippet = doc["text"].strip().replace("\n", " ")[:2000]
-            doc_prompt_lines.append(f"- [{doc['index']}] {snippet}")
-        doc_prompt_lines.append(
-            "Return JSON list like [{\"index\":0,\"score\":0.87}, ...] sorted by relevance. "
-            "Keep score between 0 and 1."
-        )
-        user_content = "\n".join(doc_prompt_lines)
-
+        messages = self._build_messages(query_bundle.query_str, nodes)
         try:
             response = self._client.chat.completions.create(
                 model=self.model,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": "You are a precise reranker that outputs JSON.",
-                    },
-                    {
-                        "role": "user",
-                        "content": user_content,
-                    },
-                ],
+                messages=messages,
                 temperature=0.0,
             )
-            content = (
-                response.choices[0].message.content if response.choices else None
-            )
-            if not content:
-                return nodes[: self.top_n]
-            content = content.strip()
-            if content.startswith("```"):
-                content = content.split("```", 2)[1]
-            data = json.loads(content)
         except Exception as exc:
-            logger.warning("OpenAI rerank failed: %s", exc)
+            logger.warning("Rerank request failed: %s", exc)
             return nodes[: self.top_n]
 
+        results = self._parse_rerank_response(response, len(nodes))
+
         ranked: List[NodeWithScore] = []
-        for item in data:
-            idx = item.get("index")
+        for item in results:
+            idx = getattr(item, "index", None)
+            if idx is None and isinstance(item, dict):
+                idx = item.get("index")
             if idx is None or idx >= len(nodes):
                 continue
-            score = item.get("score")
+            score = getattr(item, "relevance_score", None)
+            if score is None and isinstance(item, dict):
+                score = item.get("relevance_score", item.get("score"))
             node = nodes[idx]
             if score is not None:
                 node.score = float(score)
@@ -385,7 +422,80 @@ class APIReranker(BaseNodePostprocessor):
     ) -> List[NodeWithScore]:
         if not nodes or not query_bundle:
             return nodes[: self.top_n]
-        return self._call_openai_api(nodes, query_bundle)
+        return self._call_rerank_api(nodes, query_bundle)
+
+    @staticmethod
+    def _build_messages(query: str, nodes: List[NodeWithScore]) -> List[dict]:
+        """Construct a prompt that asks the model to rerank documents and return JSON only."""
+        doc_blocks = []
+        for idx, node in enumerate(nodes):
+            text = node.node.get_content() if hasattr(node, "node") else ""
+            snippet = text[:800]
+            doc_blocks.append(f"[{idx}] {snippet}")
+        user_prompt = (
+            "You are a reranker. Given a query and candidate documents, return a JSON "
+            "array of objects with fields `index` (int) and `relevance_score` (float, higher means more relevant). "
+            "Only include the top items. Do not add explanations or extra text.\n\n"
+            f"Query: {query}\n\n"
+            "Documents:\n" + "\n\n".join(doc_blocks) + "\n\n"
+            "Output JSON array like: [{\"index\":0,\"relevance_score\":12.3},{\"index\":4,\"relevance_score\":11.8}]"
+        )
+        return [
+            {"role": "system", "content": "Return only JSON for reranking results."},
+            {"role": "user", "content": user_prompt},
+        ]
+
+    def _parse_rerank_response(self, response: Any, total_nodes: int) -> List[dict]:
+        """Extract rerank results from a chat completion response."""
+        content = None
+        try:
+            choices = getattr(response, "choices", None) or []
+            if choices:
+                content = getattr(choices[0].message, "content", None)
+        except Exception:
+            pass
+
+        if content is None and isinstance(response, dict):
+            choices = response.get("choices") or []
+            if choices and isinstance(choices[0], dict):
+                content = choices[0].get("message", {}).get("content")
+
+        if not content:
+            return []
+
+        # strip code fences if present
+        fenced = re.findall(r"```(?:json)?\\s*(.*?)\\s*```", content, flags=re.S)
+        if fenced:
+            content = fenced[0]
+
+        try:
+            data = json.loads(content)
+        except Exception:
+            logger.warning("Failed to parse rerank JSON response: %s", content[:200])
+            return []
+
+        if isinstance(data, dict):
+            if "data" in data:
+                data = data["data"]
+            elif "results" in data:
+                data = data["results"]
+
+        if not isinstance(data, list):
+            return []
+
+        cleaned = []
+        for item in data:
+            idx = None
+            score = None
+            if isinstance(item, dict):
+                idx = item.get("index")
+                score = item.get("relevance_score", item.get("score"))
+            if idx is None or idx >= total_nodes or idx < 0:
+                continue
+            if score is None:
+                continue
+            cleaned.append({"index": int(idx), "relevance_score": float(score)})
+        return cleaned
 
 
 class SafeQdrantVectorStore(QdrantVectorStore):
