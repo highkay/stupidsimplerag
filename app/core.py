@@ -305,6 +305,7 @@ class APIReranker(BaseNodePostprocessor):
     _api_key: Optional[str] = PrivateAttr()
     _client: Any = PrivateAttr()
     _base_url: Optional[str] = PrivateAttr()
+    _use_rerank_endpoint: bool = PrivateAttr()
 
     def __init__(
         self,
@@ -316,8 +317,13 @@ class APIReranker(BaseNodePostprocessor):
         model_name = os.getenv("RERANK_MODEL")
         api_key = os.getenv("RERANK_API_KEY") or os.getenv("OPENAI_API_KEY")
         raw_url = os.getenv("RERANK_API_URL") or os.getenv("RERANK_API_BASE")
-        resolved_base = self._normalize_base_url(raw_url)
-        resolved_url = f"{resolved_base}/chat/completions" if resolved_base else None
+        use_rerank_endpoint = self._looks_like_rerank_endpoint(raw_url)
+        resolved_base = None if use_rerank_endpoint else self._normalize_base_url(raw_url)
+        resolved_url = (
+            self._normalize_rerank_url(raw_url or "")
+            if use_rerank_endpoint
+            else f"{resolved_base}/chat/completions" if resolved_base else None
+        )
         resolved_timeout = timeout or float(os.getenv("RERANK_TIMEOUT", "180"))
         resolved_return_docs = (
             return_documents
@@ -334,25 +340,58 @@ class APIReranker(BaseNodePostprocessor):
         )
 
         self._api_key = api_key
+        self._use_rerank_endpoint = use_rerank_endpoint
         self._base_url = resolved_base or os.getenv("OPENAI_API_BASE")
 
-        try:
-            self._client = OpenAI(
-                api_key=self._api_key,
-                base_url=self._base_url,
-                timeout=self.timeout,
-            )
+        if self._use_rerank_endpoint:
+            self._client = None
             logger.info(
-                "APIReranker ready openai-style base=%s endpoint=%s top_n=%s model=%s timeout=%ss",
-                self._base_url,
+                "APIReranker ready rerank-endpoint url=%s top_n=%s model=%s timeout=%ss",
                 self.api_url,
                 top_n,
                 model_name,
                 self.timeout,
             )
-        except Exception as exc:
-            logger.warning("Rerank disabled: failed to init OpenAI client (%s)", exc)
-            self._client = None
+        else:
+            try:
+                self._client = OpenAI(
+                    api_key=self._api_key,
+                    base_url=self._base_url,
+                    timeout=self.timeout,
+                )
+                logger.info(
+                    "APIReranker ready openai-style base=%s endpoint=%s top_n=%s model=%s timeout=%ss",
+                    self._base_url,
+                    self.api_url,
+                    top_n,
+                    model_name,
+                    self.timeout,
+                )
+            except Exception as exc:
+                logger.warning("Rerank disabled: failed to init OpenAI client (%s)", exc)
+                self._client = None
+
+    @staticmethod
+    def _looks_like_rerank_endpoint(raw_url: Optional[str]) -> bool:
+        if not raw_url:
+            return False
+        lowered = raw_url.strip().lower().rstrip("/")
+        return "/rerank" in lowered
+
+    @staticmethod
+    def _normalize_rerank_url(raw_url: str) -> str:
+        url = raw_url.strip()
+        if not url:
+            return ""
+        url = url.rstrip("/")
+        lowered = url.lower()
+        if lowered.endswith("/rerank"):
+            return url
+        if "/rerank" in lowered:
+            return url
+        if lowered.endswith("/v1"):
+            return f"{url}/rerank"
+        return f"{url}/v1/rerank"
 
     @staticmethod
     def _normalize_base_url(raw_url: Optional[str]) -> str:
@@ -380,9 +419,42 @@ class APIReranker(BaseNodePostprocessor):
         nodes: List[NodeWithScore],
         query_bundle: QueryBundle,
     ) -> List[NodeWithScore]:
-        if not nodes or not self._client or not self.model:
+        if not nodes or not self.model:
             return nodes[: self.top_n]
+        if self._use_rerank_endpoint:
+            return self._call_rerank_endpoint(nodes, query_bundle)
+        if not self._client:
+            return nodes[: self.top_n]
+        return self._call_chat_rerank(nodes, query_bundle)
 
+    def _call_rerank_endpoint(
+        self, nodes: List[NodeWithScore], query_bundle: QueryBundle
+    ) -> List[NodeWithScore]:
+        headers = {"Content-Type": "application/json"}
+        if self._api_key:
+            headers["Authorization"] = f"Bearer {self._api_key}"
+        payload = {
+            "model": self.model,
+            "query": query_bundle.query_str,
+            "documents": [n.node.get_content() for n in nodes],
+            "top_n": self.top_n,
+            "return_documents": self.return_documents,
+        }
+        try:
+            response = httpx.post(
+                self.api_url, json=payload, headers=headers, timeout=self.timeout
+            )
+            response.raise_for_status()
+            data = response.json()
+            results = self._extract_rerank_items(data)
+        except Exception as exc:
+            logger.warning("Rerank request failed (endpoint=%s): %s", self.api_url, exc)
+            return nodes[: self.top_n]
+        return self._apply_results(nodes, results)
+
+    def _call_chat_rerank(
+        self, nodes: List[NodeWithScore], query_bundle: QueryBundle
+    ) -> List[NodeWithScore]:
         messages = self._build_messages(query_bundle.query_str, nodes)
         try:
             response = self._client.chat.completions.create(
@@ -395,13 +467,19 @@ class APIReranker(BaseNodePostprocessor):
             return nodes[: self.top_n]
 
         results = self._parse_rerank_response(response, len(nodes))
+        return self._apply_results(nodes, results)
 
+    def _apply_results(
+        self, nodes: List[NodeWithScore], results: List[dict]
+    ) -> List[NodeWithScore]:
+        if not results:
+            return nodes[: self.top_n]
         ranked: List[NodeWithScore] = []
         for item in results:
             idx = getattr(item, "index", None)
             if idx is None and isinstance(item, dict):
                 idx = item.get("index")
-            if idx is None or idx >= len(nodes):
+            if idx is None or idx >= len(nodes) or idx < 0:
                 continue
             score = getattr(item, "relevance_score", None)
             if score is None and isinstance(item, dict):
@@ -410,10 +488,8 @@ class APIReranker(BaseNodePostprocessor):
             if score is not None:
                 node.score = float(score)
             ranked.append(node)
-
         if not ranked:
             return nodes[: self.top_n]
-
         ranked.sort(key=lambda x: (x.score or 0.0), reverse=True)
         return ranked[: self.top_n]
 
@@ -474,25 +550,26 @@ class APIReranker(BaseNodePostprocessor):
             logger.warning("Failed to parse rerank JSON response: %s", content[:200])
             return []
 
-        if isinstance(data, dict):
-            if "data" in data:
-                data = data["data"]
-            elif "results" in data:
-                data = data["results"]
+        return self._extract_rerank_items(data)
 
-        if not isinstance(data, list):
-            return []
-
-        cleaned = []
-        for item in data:
-            idx = None
-            score = None
-            if isinstance(item, dict):
-                idx = item.get("index")
-                score = item.get("relevance_score", item.get("score"))
-            if idx is None or idx >= total_nodes or idx < 0:
+    @staticmethod
+    def _extract_rerank_items(data: Any) -> List[dict]:
+        items: List[Any] = []
+        if isinstance(data, list):
+            items = data
+        elif isinstance(data, dict):
+            for key in ("results", "data"):
+                value = data.get(key)
+                if isinstance(value, list):
+                    items = value
+                    break
+        cleaned: List[dict] = []
+        for item in items:
+            if not isinstance(item, dict):
                 continue
-            if score is None:
+            idx = item.get("index")
+            score = item.get("relevance_score", item.get("score"))
+            if idx is None or score is None:
                 continue
             cleaned.append({"index": int(idx), "relevance_score": float(score)})
         return cleaned
