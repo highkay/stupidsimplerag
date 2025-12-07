@@ -385,15 +385,34 @@ async def ingest_batch(files: List[UploadFile] = File(...)) -> List[IngestRespon
 
 
 @app.post("/ingest/text", response_model=IngestResponse)
-async def ingest_text_api(body: TextIngestRequest) -> IngestResponse:
+async def ingest_text_api(request: Request, body: TextIngestRequest) -> IngestResponse:
     content = body.content.strip()
     if not content:
         raise HTTPException(status_code=400, detail="content must not be empty")
 
-    now = datetime.datetime.utcnow()
-    date_str = now.strftime("%Y-%m-%d")
-    filename = body.filename or f"inline_{now.strftime('%Y%m%d_%H%M%S')}.md"
-    logger.info("Text ingest filename=%s date=%s", filename, date_str)
+    # 尝试从 X-File-Mtime header 提取日期
+    header_value = request.headers.get("x-file-mtime")
+    ingest_date = None
+    if header_value:
+        ingest_date = _parse_epoch_date(header_value) or _parse_iso_date(header_value)
+        if not ingest_date:
+            logger.warning(
+                "Failed to parse X-File-Mtime header=%r for text ingest",
+                header_value,
+            )
+        else:
+            logger.debug(
+                "Resolved ingest date %s from X-File-Mtime header for text ingest",
+                ingest_date,
+            )
+    
+    # 如果 header 中没有日期或解析失败，使用当前时间
+    if not ingest_date:
+        now = datetime.datetime.utcnow()
+        ingest_date = now.strftime("%Y-%m-%d")
+    
+    filename = body.filename or f"inline_{datetime.datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.md"
+    logger.info("Text ingest filename=%s date=%s", filename, ingest_date)
     logger.debug(
         "Text ingest filename=%s raw_len=%d stripped_len=%d",
         filename,
@@ -401,7 +420,7 @@ async def ingest_text_api(body: TextIngestRequest) -> IngestResponse:
         len(content),
     )
     nodes, skipped, doc_hash = await _process_and_insert_content(
-        filename, content, date_str
+        filename, content, ingest_date
     )
     status = "skipped" if skipped else "ok"
     logger.info(

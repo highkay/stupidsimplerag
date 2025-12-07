@@ -60,7 +60,8 @@ docker-compose up -d --build
 }
 ```
 
-- **行为**：使用当前 UTC 日期写入 `date` 元数据，并复用同一套去重/切分/插入逻辑。
+- **可选 Header**：`X-File-Mtime`，可使用 Unix 时间戳（秒/ms）或 ISO8601 字符串；若提供则作为该文档的业务日期写入元数据，否则使用当前 UTC 日期。
+- **行为**：复用同一套去重/切分/插入逻辑。
 - **响应**：`IngestResponse`。
 
 ### `POST /chat`（检索 + 生成）
@@ -97,13 +98,20 @@ docker-compose up -d --build
 ### 示例
 
 ```bash
-curl -X POST http://localhost:8000/ingest -F "file=@./docs/sample_report.md"
+# 单文件入库（可选 X-File-Mtime header）
+curl -X POST http://localhost:8000/ingest \
+  -H "X-File-Mtime: 1704067200" \
+  -F "file=@./docs/sample_report.md"
 
+# 文本入库（支持 X-File-Mtime header）
 curl -X POST http://localhost:8000/ingest/text \
   -H "Content-Type: application/json" \
+  -H "X-File-Mtime: 2025-01-01T00:00:00Z" \
   -d '{"filename":"20250301_NVDA.md","content":"# 财报\\n..."}'
 
-curl -X POST http://localhost:8000/chat -H "Content-Type: application/json" \
+# 检索查询
+curl -X POST http://localhost:8000/chat \
+  -H "Content-Type: application/json" \
   -d '{"query":"英伟达最新财报表现","start_date":"2025-01-01"}'
 ```
 
