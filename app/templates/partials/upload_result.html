@@ -1,14 +1,20 @@
 {% if error %}
-<div class="card error">
-    <h3>入库失败</h3>
-    <p>{{ error }}</p>
+<div class="alert alert-error shadow-lg">
+    <div>
+        <span class="text-lg font-semibold">入库失败</span>
+        <p class="text-sm">{{ error }}</p>
+    </div>
 </div>
 {% elif result %}
-<div class="card success">
-    <h3>入库完成</h3>
-    <p>{{ result.filename }} · {{ result.chunks }} 个切片</p>
-    <div class="muted">状态：{{ result.status }}</div>
+<div class="alert alert-success shadow-lg">
+    <div>
+        <span class="text-lg font-semibold">入库完成</span>
+        <p class="text-sm">{{ result.filename }} · {{ result.chunks }} 个切片</p>
+        <p class="text-xs text-base-content/60">状态：{{ result.status }}</p>
+    </div>
 </div>
 {% else %}
-<div class="muted">暂无结果</div>
+<div class="card bg-base-100 shadow-lg ring-1 ring-base-200">
+    <div class="card-body text-sm text-base-content/70">暂无结果</div>
+</div>
 {% endif %}

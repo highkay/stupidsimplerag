@@ -1,28 +1,106 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="light">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>stupidsimplerag 控制台</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://cdn.jsdelivr.net/npm/daisyui@4.12.10/dist/full.min.css" rel="stylesheet">
+    <script src="https://unpkg.com/htmx.org@2.0.3"></script>
+    <script src="https://unpkg.com/htmx.org/dist/ext/loading-states.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.7/dist/cdn.min.js" defer></script>
+    <link rel="icon" type="image/svg+xml" href="{{ url_for('static', path='favicon.svg') }}">
     <link rel="stylesheet" href="{{ url_for('static', path='styles.css') }}">
-    <script src="https://unpkg.com/htmx.org@1.9.12" integrity="sha384-TK1YrY8ApX2HFOKRSbuuSSMzdON3NofM8JrIoVNewc19hXtF87o5iVbQ+9Y9Rajp" crossorigin="anonymous"></script>
+    <script>
+      document.addEventListener("DOMContentLoaded", () => {
+        htmx.config.timeout = 240000; // long-poll friendly
+      });
+    </script>
 </head>
-<body>
-    <header class="app-header">
-        <div class="branding">
-            <span class="title">stupidsimplerag</span>
-            <span class="subtitle">金融级极速 RAG 控制面板</span>
+<body class="font-body bg-base-200 text-base-content" x-data="appShell()" x-init="init()">
+    <div class="min-h-screen flex flex-col relative">
+        <header class="backdrop-blur bg-base-100/80 border-b border-base-200 sticky top-0 z-20">
+            <div class="container mx-auto px-4 py-3 flex items-center justify-between gap-4">
+                <div class="flex items-center gap-3">
+                    <img src="{{ url_for('static', path='favicon.svg') }}" alt="logo" class="w-10 h-10">
+                    <div>
+                        <div class="text-xl font-semibold leading-tight">stupidsimplerag</div>
+                        <p class="text-sm text-base-content/60">专用 · 高效 · 省资源</p>
+                    </div>
+                </div>
+                <nav class="tabs tabs-boxed bg-base-200/80 p-1">
+                    <a class="tab {% if request.url.path == '/' %}tab-active{% endif %}" href="/">指标</a>
+                    <a class="tab {% if request.url.path.startswith('/ui/upload') and not request.url.path.endswith('/batch') %}tab-active{% endif %}" href="/ui/upload">手动上传</a>
+                    <a class="tab {% if request.url.path.startswith('/ui/upload/batch') %}tab-active{% endif %}" href="/ui/upload/batch">批量上传</a>
+                    <a class="tab {% if request.url.path.startswith('/ui/chat') %}tab-active{% endif %}" href="/ui/chat">查询</a>
+                </nav>
+            </div>
+        </header>
+
+        <main id="page-root" class="flex-1 container mx-auto px-4 py-6 space-y-6 relative z-10">
+            {% block content %}{% endblock %}
+        </main>
+
+        <footer class="px-4 py-6 border-t border-base-200 text-sm text-base-content/70 bg-base-100/80 backdrop-blur">
+            <div class="container mx-auto flex items-center justify-between">
+                <div>LLM 预处理 · 混合检索 · Qdrant on-disk</div>
+                <div class="flex items-center gap-3">
+                    <span class="badge badge-outline">FastAPI</span>
+                    <span class="badge badge-outline">htmx 2.x</span>
+                    <span class="badge badge-outline">daisyUI</span>
+                </div>
+            </div>
+        </footer>
+    </div>
+
+    <div
+        id="global-indicator"
+        class="htmx-indicator fixed inset-0 z-30 hidden items-center justify-center bg-base-300/70 backdrop-blur"
+        aria-live="assertive"
+    >
+        <div class="card w-80 bg-base-100 shadow-2xl animate-pulse">
+            <div class="card-body items-center text-center">
+                <span class="loading loading-spinner loading-lg text-primary"></span>
+                <p class="text-lg font-semibold" x-text="busyText"></p>
+                <p class="text-sm text-base-content/60">长时间请求已升级为异步处理，稍等片刻</p>
+            </div>
         </div>
-        <nav class="nav">
-            <a href="/">指标</a>
-            <a href="/ui/upload">手动上传</a>
-            <a href="/ui/upload/batch">批量上传</a>
-            <a href="/ui/chat">查询</a>
-        </nav>
-    </header>
-    <main>
-        {% block content %}{% endblock %}
-    </main>
-    <div id="htmx-indicator" class="indicator">处理中...</div>
+    </div>
+
+    <div class="toast toast-end z-40" x-show="toast" x-transition>
+        <div class="alert alert-info shadow-lg">
+            <div>
+                <span class="text-lg" x-text="toast?.title"></span>
+                <p class="text-sm" x-text="toast?.body"></p>
+            </div>
+        </div>
+    </div>
+
+    <script>
+      function appShell() {
+        return {
+          busyText: "处理中...",
+          toast: null,
+          init() {
+            document.body.addEventListener("htmx:beforeRequest", (event) => {
+              const text = event.detail?.elt?.dataset?.busyText;
+              this.busyText = text || "处理中...";
+              document.getElementById("global-indicator")?.classList.remove("hidden");
+            });
+            document.body.addEventListener("htmx:afterRequest", () => {
+              document.getElementById("global-indicator")?.classList.add("hidden");
+            });
+            document.body.addEventListener("htmx:responseError", (event) => {
+              const msg = event.detail?.xhr?.responseText || "请稍后再试";
+              this.showToast("请求失败", msg);
+            });
+          },
+          showToast(title, body) {
+            this.toast = { title, body };
+            setTimeout(() => (this.toast = null), 3600);
+          },
+        };
+      }
+    </script>
 </body>
 </html>

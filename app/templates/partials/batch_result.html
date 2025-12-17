@@ -1,19 +1,51 @@
 {% if error %}
-<div class="card error">
-    <h3>批量入库失败</h3>
-    <p>{{ error }}</p>
+<div class="alert alert-error shadow-lg">
+    <div>
+        <span class="text-lg font-semibold">批量入库失败</span>
+        <p class="text-sm">{{ error }}</p>
+    </div>
 </div>
 {% elif results %}
-<div class="card success">
-    <h3>批量入库完成</h3>
-    <ul class="sources">
-        {% for item in results %}
-        <li>
-            <strong>{{ item.filename }}</strong> · {{ item.chunks }} 切片 · {{ item.status }}
-        </li>
-        {% endfor %}
-    </ul>
+<div class="card bg-base-100 shadow-xl ring-1 ring-base-200">
+    <div class="card-body space-y-3">
+        <div class="flex items-center justify-between">
+            <h3 class="card-title text-lg">批量入库完成</h3>
+            <div class="badge badge-secondary badge-outline">{{ results | length }} files</div>
+        </div>
+        <div class="overflow-x-auto">
+            <table class="table table-sm">
+                <thead>
+                    <tr>
+                        <th>文件名</th>
+                        <th>切片</th>
+                        <th>状态</th>
+                        <th>错误</th>
+                    </tr>
+                </thead>
+                <tbody>
+                {% for item in results %}
+                    <tr>
+                        <td class="font-semibold">{{ item.filename }}</td>
+                        <td>{{ item.chunks }}</td>
+                        <td>
+                            {% if item.status == "ok" %}
+                                <span class="badge badge-success badge-outline">ok</span>
+                            {% elif item.status == "skipped" %}
+                                <span class="badge badge-ghost">skipped</span>
+                            {% else %}
+                                <span class="badge badge-error badge-outline">{{ item.status }}</span>
+                            {% endif %}
+                        </td>
+                        <td class="text-xs text-base-content/60">{{ item.error or "-" }}</td>
+                    </tr>
+                {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
 </div>
 {% else %}
-<div class="muted">暂无结果</div>
+<div class="card bg-base-100 shadow-lg ring-1 ring-base-200">
+    <div class="card-body text-sm text-base-content/70">暂无结果</div>
+</div>
 {% endif %}

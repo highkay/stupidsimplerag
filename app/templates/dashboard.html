@@ -1,66 +1,196 @@
 {% extends "base.html" %}
 
 {% block content %}
-<section class="panel">
-    <h2>运行指标</h2>
-    <div class="cards">
-        <div class="card">
-            <h3>Qdrant 状态</h3>
-            <p>{{ metrics.status or "unknown" }}</p>
-            <div class="muted">集合：{{ metrics.collection_name or "-" }}</div>
-        </div>
-        <div class="card">
-            <h3>已入库向量</h3>
-            <p>{{ metrics.points_count or metrics.vectors_count or 0 }}</p>
-            <div class="muted">segments: {{ metrics.segments_count or 0 }}</div>
-        </div>
-        <div class="card">
-            <h3>缓存切片</h3>
-            <p>{{ cache_stats.entries }}</p>
-            <div class="muted">TTL {{ cache_stats.ttl }}s / Max {{ cache_stats.maxsize }}</div>
+<section class="grid gap-6">
+    <div class="card bg-base-100 shadow-xl ring-1 ring-base-200">
+        <div class="card-body lg:flex lg:items-center lg:justify-between gap-8">
+            <div class="flex-1 space-y-4">
+                <p class="badge badge-primary badge-lg">专用 · 高效 · 省资源</p>
+                <h1 class="text-3xl lg:text-4xl font-semibold">stupidsimplerag 控制台</h1>
+                <p class="text-base text-base-content/70">
+                    面向单机/小型节点的高效 RAG：重预处理，轻运行时；低资源占用，高吞吐；可观测、可控、易调参。支持可选 Rerank/生成，直接返回检索结果以进一步压缩成本。
+                </p>
+                <div class="flex flex-wrap gap-2">
+                    <span class="badge badge-outline">轻量部署</span>
+                    <span class="badge badge-outline">低延迟</span>
+                    <span class="badge badge-outline">缓存优先</span>
+                    <span class="badge badge-outline">混合检索</span>
+                    <span class="badge badge-outline">可选 Rerank/LLM</span>
+                </div>
+            </div>
+            <div class="flex-1">
+                <div class="stats w-full bg-base-100">
+                    <div class="stat">
+                        <div class="stat-title">Qdrant 状态</div>
+                        <div class="stat-value flex items-center gap-2">
+                            {% set status = (metrics.status or "unknown") | lower %}
+                            {% if status in ["reachable","ready","green","ok"] %}
+                                <span class="badge badge-success badge-lg gap-2">
+                                    <span class="indicator-item badge badge-xs badge-success"></span>
+                                    Ready
+                                </span>
+                            {% elif status in ["unreachable","red","error"] %}
+                                <span class="badge badge-error badge-lg gap-2">
+                                    <span class="indicator-item badge badge-xs badge-error"></span>
+                                    Unreachable
+                                </span>
+                            {% else %}
+                                <span class="badge badge-warning badge-lg gap-2">
+                                    <span class="indicator-item badge badge-xs badge-warning"></span>
+                                    {{ metrics.status or "unknown" }}
+                                </span>
+                            {% endif %}
+                        </div>
+                        <div class="stat-desc">
+                            集合：{{ metrics.collection_name or "-" }}
+                            {% if metrics.error %}<span class="text-error block">错误: {{ metrics.error }}</span>{% endif %}
+                        </div>
+                    </div>
+                    <div class="stat">
+                        <div class="stat-title">已入库向量</div>
+                        <div class="stat-value">{{ metrics.points_count or metrics.vectors_count or 0 }}</div>
+                        <div class="stat-desc">segments: {{ metrics.segments_count or 0 }}</div>
+                    </div>
+                    <div class="stat">
+                        <div class="stat-title">缓存切片</div>
+                        <div class="stat-value text-secondary">{{ cache_stats.entries }}</div>
+                        <div class="stat-desc">TTL {{ cache_stats.ttl }}s / Max {{ cache_stats.maxsize }}</div>
+                    </div>
+                </div>
+            </div>
         </div>
     </div>
-</section>
 
-<section class="panel">
-    <h2>配置快照</h2>
-    <div class="cards">
-        <div class="card">
-            <h3>LLM</h3>
-            <p>{{ config.llm_model }}</p>
-            <div class="muted">Embedding: {{ config.embedding_model }}</div>
+    <div class="grid gap-6 lg:grid-cols-3">
+        <div class="card bg-base-100 shadow-lg ring-1 ring-base-200">
+            <div class="card-body">
+                <div class="flex items-center justify-between">
+                    <h2 class="card-title text-base">模型配置</h2>
+                    <div class="badge badge-ghost">LLM</div>
+                </div>
+                <p class="text-xl font-semibold">{{ config.llm_model }}</p>
+                <p class="text-sm text-base-content/60">Embedding: {{ config.embedding_model }}</p>
+                <p class="text-sm text-base-content/60">Rerank: {{ config.rerank_model }}</p>
+            </div>
         </div>
-        <div class="card">
-            <h3>Rerank</h3>
-            <p>{{ config.rerank_model }}</p>
-            <div class="muted">TopN {{ config.top_n_rerank }}</div>
+        <div class="card bg-base-100 shadow-lg ring-1 ring-base-200">
+            <div class="card-body">
+                <div class="flex items-center justify-between">
+                    <h2 class="card-title text-base">检索参数</h2>
+                    <div class="badge badge-ghost">Hybrid</div>
+                </div>
+                <p class="text-xl font-semibold">TopK {{ config.top_k }}</p>
+                <p class="text-sm text-base-content/60">Rerank TopN {{ config.top_n_rerank }}</p>
+                <p class="text-sm text-base-content/60">最终返回 {{ config.final_top_k }}</p>
+            </div>
         </div>
-        <div class="card">
-            <h3>检索参数</h3>
-            <p>TopK {{ config.top_k }}</p>
-            <div class="muted">最终返回 {{ config.final_top_k }}</div>
+        <div class="card bg-base-100 shadow-lg ring-1 ring-base-200">
+            <div class="card-body">
+                <div class="flex items-center justify-between">
+                    <h2 class="card-title text-base">缓存状态</h2>
+                    <div class="badge badge-ghost">LRU</div>
+                </div>
+                <p class="text-xl font-semibold">{{ cache_stats.entries }} entries</p>
+                <div class="flex items-center gap-2 mt-2 text-sm text-base-content/60">
+                    <progress class="progress progress-primary w-full" value="{{ cache_stats.entries or 0 }}" max="{{ cache_stats.maxsize or 1 }}"></progress>
+                </div>
+                <p class="text-sm text-base-content/60">TTL: {{ cache_stats.ttl }} 秒</p>
+            </div>
         </div>
     </div>
-</section>
 
-<section class="panel">
-    <h2>操作入口</h2>
-    <div class="cards">
-        <a class="card" href="/ui/upload">
-            <h3>单文件手动上传</h3>
-            <p>Ingest</p>
-            <div class="muted">Markdown 文档 + LLM 预处理</div>
-        </a>
-        <a class="card" href="/ui/upload/batch">
-            <h3>批量上传</h3>
-            <p>Batch</p>
-            <div class="muted">多文件并行触发 ETL</div>
-        </a>
-        <a class="card" href="/ui/chat">
-            <h3>在线查询</h3>
-            <p>Chat</p>
-            <div class="muted">混合检索 + rerank</div>
-        </a>
+    <div class="grid gap-6 lg:grid-cols-2">
+        <div class="card bg-base-100 shadow-lg ring-1 ring-base-200">
+            <div class="card-body">
+                <h2 class="card-title text-lg">支持的 API</h2>
+                <div class="overflow-x-auto">
+                    <table class="table table-zebra table-sm">
+                        <thead>
+                            <tr>
+                                <th>方法</th>
+                                <th>路径</th>
+                                <th>说明</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td><span class="badge badge-primary badge-outline">POST</span></td>
+                                <td class="font-mono text-xs">/ingest</td>
+                                <td>单文件入库（multipart: file）</td>
+                            </tr>
+                            <tr>
+                                <td><span class="badge badge-primary badge-outline">POST</span></td>
+                                <td class="font-mono text-xs">/ingest/batch</td>
+                                <td>多文件批量入库（multipart: files[]），并发 {{ config.batch_concurrency }}</td>
+                            </tr>
+                            <tr>
+                                <td><span class="badge badge-primary badge-outline">POST</span></td>
+                                <td class="font-mono text-xs">/ingest/text</td>
+                                <td>JSON: { "content", "filename?" }</td>
+                            </tr>
+                            <tr>
+                                <td><span class="badge badge-accent badge-outline">POST</span></td>
+                                <td class="font-mono text-xs">/chat</td>
+                                <td>JSON: { "query", filters..., "skip_rerank"?, "skip_generation"? }</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+                <div class="mockup-code text-xs mt-3">
+                    <pre data-prefix="$"><code>curl -X POST http://localhost:8000/chat \</code></pre>
+                    <pre data-prefix=" "><code>  -H "Content-Type: application/json" \</code></pre>
+                    <pre data-prefix=" "><code>  -d '{ "query": "英伟达最新财报表现", "start_date": "2025-01-01" }'</code></pre>
+                </div>
+            </div>
+        </div>
+
+        <div class="card bg-base-100 shadow-lg ring-1 ring-base-200">
+            <div class="card-body space-y-3">
+                <h2 class="card-title text-lg">Schema 示例</h2>
+                <div>
+                    <h3 class="font-semibold text-sm mb-1">ChatRequest</h3>
+                    <div class="mockup-code text-xs">
+                        <pre><code>{
+  "query": "英伟达最新财报表现",
+  "start_date": "2025-01-01",
+  "end_date": "2025-12-31",
+  "filename": "20250228_NVIDIA_Report.md",
+  "filename_contains": "NVIDIA",
+  "keywords_any": ["NVDA", "GPU"],
+  "keywords_all": ["数据中心"]
+}</code></pre>
+                    </div>
+                </div>
+                <div>
+                    <h3 class="font-semibold text-sm mb-1">ChatResponse</h3>
+                    <div class="mockup-code text-xs">
+                        <pre><code>{
+  "answer": "...LLM回答...",
+  "sources": [
+    {
+      "filename": "20250228_NVIDIA_Report.md",
+      "date": "2025-02-28",
+      "score": 0.8431,
+      "keywords": "NVDA,英伟达,GPU",
+      "text": "原始切片前200字..."
+    }
+  ]
+}</code></pre>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="card bg-base-100 shadow-lg ring-1 ring-base-200">
+        <div class="card-body">
+            <h2 class="card-title text-lg">小贴士</h2>
+            <ul class="list-disc list-inside text-sm text-base-content/70 space-y-2">
+                <li>索引、缓存和检索参数实时读取环境变量与 Qdrant 集合，调整后刷新即可验证。</li>
+                <li>长时请求（入库/检索）已开启 htmx 异步与统一加载态，浏览器不会卡死。</li>
+                <li>所有 UI 表单保持无障碍回退：禁用 JS 时仍然通过 FastAPI 路由可用。</li>
+            </ul>
+        </div>
     </div>
 </section>
 {% endblock %}

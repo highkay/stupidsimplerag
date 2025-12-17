@@ -1,42 +1,106 @@
 {% extends "base.html" %}
 
 {% block content %}
-<section class="panel">
-    <h2>查询 / 混合检索</h2>
-    <p class="muted">内置低成本混合检索（Dense + Sparse）与 rerank，可在这里快速验证召回质量。</p>
-    <form
-        method="post"
-        action="/ui/chat/query"
-        hx-post="/ui/chat/query"
-        hx-target="#chat-result"
-        hx-swap="innerHTML"
-        hx-indicator="#htmx-indicator"
-    >
-        <label for="query">问题</label>
-        <input type="text" id="query" name="query" placeholder="例如：英伟达最新财报表现" required>
+<section class="grid lg:grid-cols-12 gap-6">
+    <div class="lg:col-span-5 space-y-4">
+        <div class="card bg-base-100 shadow-xl ring-1 ring-base-200">
+            <div class="card-body space-y-4">
+                <div class="flex items-center justify-between">
+                    <div>
+                        <h2 class="card-title text-lg">查询 / 混合检索</h2>
+                        <p class="text-sm text-base-content/70">低成本 Dense + Sparse + Rerank，带时间衰减</p>
+                    </div>
+                    <div class="badge badge-primary badge-outline">Chat</div>
+                </div>
+                <form
+                    method="post"
+                    action="/ui/chat/query"
+                    hx-post="/ui/chat/query"
+                    hx-target="#chat-result"
+                    hx-swap="innerHTML transition:true"
+                    hx-indicator="#global-indicator"
+                    hx-sync="closest form:queue"
+                    hx-disabled-elt="fieldset, button"
+                    hx-on::afterRequest="document.getElementById('chat-result')?.scrollIntoView({behavior:'smooth'})"
+                    data-busy-text="正在检索与重排..."
+                    class="space-y-4"
+                >
+                    <fieldset class="space-y-4">
+                        <label class="form-control">
+                            <div class="label">
+                                <span class="label-text">问题</span>
+                                <span class="label-text-alt text-primary">必填</span>
+                            </div>
+                            <input type="text" id="query" name="query" placeholder="例如：英伟达最新财报表现" class="input input-bordered w-full" required>
+                        </label>
 
-        <label>时间过滤器</label>
-        <div class="date-range">
-            <input type="date" name="start_date" placeholder="起始日期">
-            <input type="date" name="end_date" placeholder="结束日期">
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                            <label class="form-control">
+                                <div class="label"><span class="label-text">起始日期</span></div>
+                                <input type="date" name="start_date" class="input input-bordered w-full">
+                            </label>
+                            <label class="form-control">
+                                <div class="label"><span class="label-text">结束日期</span></div>
+                                <input type="date" name="end_date" class="input input-bordered w-full">
+                            </label>
+                        </div>
+
+                        <details class="collapse collapse-arrow bg-base-200/60">
+                            <summary class="collapse-title text-sm font-semibold">高级过滤（文件名 / 关键词）</summary>
+                            <div class="collapse-content space-y-3">
+                                <label class="flex items-center gap-2">
+                                    <input type="checkbox" class="checkbox checkbox-sm" name="skip_rerank">
+                                    <span class="text-sm">跳过 Rerank（直接返回相似度排序，最低成本）</span>
+                                </label>
+                                <label class="flex items-center gap-2">
+                                    <input type="checkbox" class="checkbox checkbox-sm" name="skip_generation">
+                                    <span class="text-sm">跳过回答生成（仅返回切片，方便前端自行组装）</span>
+                                </label>
+                                <label class="form-control">
+                                    <div class="label"><span class="label-text">文件名（精确匹配）</span></div>
+                                    <input type="text" name="filename" placeholder="20250228_NVIDIA_Report.md" class="input input-bordered w-full">
+                                </label>
+                                <label class="form-control">
+                                    <div class="label"><span class="label-text">文件名包含</span></div>
+                                    <input type="text" name="filename_contains" placeholder="NVIDIA" class="input input-bordered w-full">
+                                </label>
+                                <label class="form-control">
+                                    <div class="label"><span class="label-text">包含任意关键词（逗号分隔）</span></div>
+                                    <input type="text" name="keywords_any" placeholder="NVDA, 英伟达, GPU" class="input input-bordered w-full">
+                                </label>
+                                <label class="form-control">
+                                    <div class="label"><span class="label-text">同时包含关键词</span></div>
+                                    <input type="text" name="keywords_all" placeholder="数据中心, 盈亏" class="input input-bordered w-full">
+                                </label>
+                            </div>
+                        </details>
+                    </fieldset>
+                    <div class="flex items-center justify-between gap-4">
+                        <div class="text-xs text-base-content/60">
+                            支持 htmx 异步请求，超时自动覆盖到长轮询加载态。
+                        </div>
+                        <button type="submit" class="btn btn-primary">执行检索</button>
+                    </div>
+                </form>
+            </div>
         </div>
 
-        <label for="filename">文件名（精确匹配）</label>
-        <input type="text" id="filename" name="filename" placeholder="20250228_NVIDIA_Report.md">
+        <div class="card bg-base-100 shadow-lg ring-1 ring-base-200">
+            <div class="card-body space-y-2">
+                <h3 class="card-title text-base">检索提示</h3>
+                <ul class="list-disc list-inside text-sm text-base-content/70 space-y-1">
+                    <li>时间过滤映射到 Qdrant metadata filter，可与 rerank 叠加。</li>
+                    <li>关键词过滤在应用层完成，减少 rerank 负担。</li>
+                    <li>缓存命中会直接回填结果，避免重复调用模型。</li>
+                </ul>
+            </div>
+        </div>
+    </div>
 
-        <label for="filename_contains">文件名包含</label>
-        <input type="text" id="filename_contains" name="filename_contains" placeholder="NVIDIA">
-
-        <label for="keywords_any">包含任意关键词（逗号分隔）</label>
-        <input type="text" id="keywords_any" name="keywords_any" placeholder="NVDA, 英伟达, GPU">
-
-        <label for="keywords_all">同时包含关键词</label>
-        <input type="text" id="keywords_all" name="keywords_all" placeholder="数据中心, 盈亏">
-
-        <button type="submit">执行检索</button>
-    </form>
-    <div id="chat-result" class="result">
-        {% include "partials/chat_result.html" %}
+    <div class="lg:col-span-7">
+        <div id="chat-result">
+            {% include "partials/chat_result.html" %}
+        </div>
     </div>
 </section>
 {% endblock %}

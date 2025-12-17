@@ -1,25 +1,63 @@
 {% extends "base.html" %}
 
 {% block content %}
-<section class="panel">
-    <h2>手动上传 Markdown</h2>
-    <p class="muted">系统会调用 LLM 执行摘要/表格/同义词提炼，并自动入库到 Qdrant。</p>
-    <form
-        method="post"
-        action="/ui/ingest"
-        hx-post="/ui/ingest"
-        hx-target="#upload-result"
-        hx-swap="innerHTML"
-        hx-indicator="#htmx-indicator"
-        hx-encoding="multipart/form-data"
-        enctype="multipart/form-data"
-    >
-        <label for="file">选择 Markdown 文件</label>
-        <input type="file" id="file" name="file" accept=".md" required>
-        <button type="submit">开始入库</button>
-    </form>
-    <div id="upload-result" class="result">
-        {% include "partials/upload_result.html" %}
+<section class="grid gap-6 lg:grid-cols-12">
+    <div class="lg:col-span-7">
+        <div class="card bg-base-100 shadow-xl ring-1 ring-base-200">
+            <div class="card-body space-y-4">
+                <div class="flex items-center justify-between">
+                    <div>
+                        <h2 class="card-title text-lg">手动上传 Markdown</h2>
+                        <p class="text-sm text-base-content/70">LLM 摘要 / 表格解读 / 同义词提炼后自动入库 Qdrant</p>
+                    </div>
+                    <div class="badge badge-primary badge-outline">Ingest</div>
+                </div>
+                <form
+                    method="post"
+                    action="/ui/ingest"
+                    hx-post="/ui/ingest"
+                    hx-target="#upload-result"
+                    hx-swap="innerHTML transition:true"
+                    hx-indicator="#global-indicator"
+                    hx-encoding="multipart/form-data"
+                    hx-sync="closest form:replace"
+                    hx-disabled-elt="fieldset, button"
+                    enctype="multipart/form-data"
+                    data-busy-text="正在分析与入库..."
+                    class="space-y-4"
+                >
+                    <fieldset class="space-y-3">
+                        <label class="form-control">
+                            <div class="label">
+                                <span class="label-text">选择 Markdown 文件</span>
+                                <span class="label-text-alt text-primary">只接受 .md</span>
+                            </div>
+                            <input type="file" id="file" name="file" accept=".md" class="file-input file-input-bordered w-full" required>
+                        </label>
+                    </fieldset>
+                    <div class="flex items-center justify-between gap-3">
+                        <p class="text-xs text-base-content/60">文件读取后由后端执行切分 + 预处理 + Qdrant 入库。</p>
+                        <button type="submit" class="btn btn-primary">开始入库</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <div class="lg:col-span-5 space-y-4">
+        <div id="upload-result">
+            {% include "partials/upload_result.html" %}
+        </div>
+        <div class="card bg-base-100 shadow-lg ring-1 ring-base-200">
+            <div class="card-body space-y-2">
+                <h3 class="card-title text-base">说明</h3>
+                <ul class="list-disc list-inside text-sm text-base-content/70 space-y-1">
+                    <li>上传内容需为 UTF-8 Markdown；其它格式请先离线转换。</li>
+                    <li>入库幂等：同一 doc_hash 会被跳过，避免重复切片。</li>
+                    <li>长时间请求会展示加载遮罩，可安全等待，无需刷新。</li>
+                </ul>
+            </div>
+        </div>
     </div>
 </section>
 {% endblock %}

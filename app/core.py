@@ -3,6 +3,7 @@ import logging
 import os
 import re
 import time
+import datetime
 from typing import Any, Callable, List, Optional, Tuple
 from urllib.parse import urlparse, urlunparse
 
@@ -25,8 +26,9 @@ from llama_index.vector_stores.qdrant.base import (
 )
 from llama_index.vector_stores.qdrant.utils import fastembed_sparse_encoder
 from openai import OpenAI
-from qdrant_client import QdrantClient
+from qdrant_client import QdrantClient, AsyncQdrantClient
 from qdrant_client.http import models as qdrant_models
+from tenacity import RetryCallState, retry, stop_after_attempt, wait_exponential
 
 from app.openai_utils import (
     OpenAICompatibleLLM,
@@ -45,10 +47,24 @@ embedding_dim = int(os.getenv("EMBEDDING_DIM", "1536"))
 llm_context_window = int(os.getenv("LLM_CONTEXT_WINDOW", "8192"))
 EMBEDDING_MAX_RETRIES = int(os.getenv("EMBEDDING_MAX_RETRIES", "3"))
 EMBEDDING_RETRY_BACKOFF = float(os.getenv("EMBEDDING_RETRY_BACKOFF", "1.5"))
+RERANK_MAX_RETRIES = int(os.getenv("RERANK_MAX_RETRIES", "3"))
+RERANK_RETRY_BACKOFF = float(os.getenv("RERANK_RETRY_BACKOFF", "1.5"))
 fastembed_model_name = os.getenv(
     "FASTEMBED_SPARSE_MODEL", "Qdrant/bm42-all-minilm-l6-v2-attentions"
 )
 fastembed_cache_dir = os.getenv("FASTEMBED_CACHE_PATH")
+
+
+def _log_rerank_retry(retry_state: RetryCallState) -> None:
+    exc = retry_state.outcome.exception() if retry_state.outcome else None
+    sleep = retry_state.next_action.sleep if retry_state.next_action else 0
+    logger.warning(
+        "Rerank request attempt %d/%d failed: %s -- retrying in %.1fs",
+        retry_state.attempt_number,
+        RERANK_MAX_RETRIES,
+        exc,
+        sleep,
+    )
 
 
 class OpenAICompatibleEmbedding(BaseEmbedding):
@@ -441,14 +457,14 @@ class APIReranker(BaseNodePostprocessor):
             "return_documents": self.return_documents,
         }
         try:
-            response = httpx.post(
-                self.api_url, json=payload, headers=headers, timeout=self.timeout
-            )
-            response.raise_for_status()
-            data = response.json()
+            data = self._perform_rerank_request(payload, headers)
             results = self._extract_rerank_items(data)
         except Exception as exc:
-            logger.warning("Rerank request failed (endpoint=%s): %s", self.api_url, exc)
+            logger.warning(
+                "Rerank request failed after retries (endpoint=%s): %s",
+                self.api_url,
+                exc,
+            )
             return nodes[: self.top_n]
         return self._apply_results(nodes, results)
 
@@ -499,6 +515,22 @@ class APIReranker(BaseNodePostprocessor):
         if not nodes or not query_bundle:
             return nodes[: self.top_n]
         return self._call_rerank_api(nodes, query_bundle)
+
+    @retry(
+        reraise=True,
+        stop=stop_after_attempt(RERANK_MAX_RETRIES),
+        wait=wait_exponential(
+            multiplier=RERANK_RETRY_BACKOFF,
+            min=RERANK_RETRY_BACKOFF,
+            max=RERANK_RETRY_BACKOFF * 4,
+        ),
+        before_sleep=_log_rerank_retry,
+    )
+    def _perform_rerank_request(self, payload: dict, headers: dict) -> dict:
+        with httpx.Client(timeout=self.timeout) as client:
+            response = client.post(self.api_url, json=payload, headers=headers)
+            response.raise_for_status()
+            return response.json()
 
     @staticmethod
     def _build_messages(query: str, nodes: List[NodeWithScore]) -> List[dict]:
@@ -752,6 +784,7 @@ def _build_qdrant_store() -> QdrantVectorStore:
 
 vector_store = _build_qdrant_store()
 storage_context = StorageContext.from_defaults(vector_store=vector_store)
+_ASYNC_CLIENT_CACHE: AsyncQdrantClient | None = None
 _INDEX_CACHE: VectorStoreIndex | None = None
 
 
@@ -766,14 +799,14 @@ def _get_index() -> VectorStoreIndex:
     return _INDEX_CACHE
 
 
-def insert_nodes(nodes: List[TextNode]) -> None:
+async def insert_nodes(nodes: List[TextNode]) -> None:
     if not nodes:
         logger.debug("insert_nodes called with empty payload; skipping")
         return
     logger.info("Inserting %d nodes into Qdrant (will trigger embedding)", len(nodes))
     start = time.perf_counter()
     index = _get_index()
-    index.insert_nodes(nodes)
+    await index.insert_nodes_async(nodes)
     elapsed = time.perf_counter() - start
     logger.debug(
         "Qdrant insert complete collection=%s count=%d duration=%.2fs",
@@ -797,6 +830,10 @@ def get_query_engine(
     end_date: Optional[str] = None,
     filename: Optional[str] = None,
     filename_contains: Optional[str] = None,
+    skip_rerank: bool = False,
+    keywords_any: Optional[List[str]] = None,
+    keywords_all: Optional[List[str]] = None,
+    time_decay_rate: Optional[float] = None,
 ):
     filters: Optional[MetadataFilters] = None
     filter_items: List[MetadataFilter] = []
@@ -837,42 +874,106 @@ def get_query_engine(
     logger.info("get_query_engine: parsed rerank_top_n=%s", rerank_top_n)
     sparse_top_k = int(os.getenv("SPARSE_TOP_K", "12"))
     logger.info("Creating query_engine with APIReranker(top_n=%s)", rerank_top_n)
+    any_set = {kw.strip().lower() for kw in (keywords_any or []) if kw and kw.strip()}
+    all_set = {kw.strip().lower() for kw in (keywords_all or []) if kw and kw.strip()}
+
+    postprocessors: List[BaseNodePostprocessor] = []
+    if not skip_rerank:
+        postprocessors.append(APIReranker(top_n=rerank_top_n))
+    postprocessors.append(ContentFilterPostprocessor())
+    postprocessors.append(KeywordFilterPostprocessor(any_set, all_set))
+    decay = time_decay_rate if time_decay_rate is not None else float(os.getenv("TIME_DECAY_RATE", "0.005"))
+    postprocessors.append(TimeDecayPostprocessor(decay_rate=decay))
+
     return index.as_query_engine(
         similarity_top_k=top_k,
         vector_store_query_mode="hybrid",
         sparse_top_k=sparse_top_k,
         filters=filters,
-        node_postprocessors=[APIReranker(top_n=rerank_top_n)],
+        node_postprocessors=postprocessors,
+        response_mode="simple_summarize",
     )
 
 
-def get_collection_metrics() -> dict:
-    """Expose lightweight collection metrics for the web dashboard."""
+def _build_async_client() -> AsyncQdrantClient:
+    global _ASYNC_CLIENT_CACHE
+    if _ASYNC_CLIENT_CACHE is not None:
+        return _ASYNC_CLIENT_CACHE
+
+    host = os.getenv("QDRANT_HOST", "qdrant")
+    port = int(os.getenv("QDRANT_PORT", "6333"))
+    qdrant_url = os.getenv("QDRANT_URL")
+    qdrant_api_key = os.getenv("QDRANT_API_KEY") or None
+    use_https = os.getenv("QDRANT_HTTPS", "false").lower() == "true"
+    client_timeout = float(os.getenv("QDRANT_CLIENT_TIMEOUT", "10"))
+
+    if qdrant_url:
+        qdrant_url = _append_port_if_missing(qdrant_url, port)
+        _ASYNC_CLIENT_CACHE = AsyncQdrantClient(
+            url=qdrant_url, api_key=qdrant_api_key, timeout=client_timeout
+        )
+        return _ASYNC_CLIENT_CACHE
+
+    resolved_host = host
+    running_in_container = os.path.exists("/.dockerenv")
+    if resolved_host == "qdrant" and not running_in_container:
+        resolved_host = "127.0.0.1"
+
+    _ASYNC_CLIENT_CACHE = AsyncQdrantClient(
+        host=resolved_host,
+        port=port,
+        https=use_https,
+        api_key=qdrant_api_key if use_https else None,
+        timeout=client_timeout,
+    )
+    return _ASYNC_CLIENT_CACHE
+
+
+async def get_collection_metrics() -> dict:
+    """Expose lightweight collection metrics for the web dashboard (async client)."""
     metrics = {
         "collection_name": getattr(vector_store, "collection_name", None),
         "vectors_count": None,
         "segments_count": None,
-        "status": "unknown",
+        "status": "uninitialized",
         "points_count": None,
+        "error": None,
     }
     collection = metrics["collection_name"]
-    client = getattr(vector_store, "client", None)
-    if not client or not collection:
+    if not collection:
+        return metrics
+
+    client = _build_async_client()
+
+    try:
+        await client.get_collections()
+        metrics["status"] = "reachable"
+    except Exception as exc:
+        metrics["status"] = "unreachable"
+        metrics["error"] = str(exc)
+        logger.warning("Qdrant reachability check failed: %s", exc)
         return metrics
 
     try:
-        info = client.collection_info(collection_name=collection)
-        metrics["status"] = getattr(info, "status", metrics["status"])
+        info = await client.get_collection(collection_name=collection)
+        status = getattr(info, "status", None)
+        if hasattr(status, "value"):
+            status = status.value
+        elif hasattr(status, "name"):
+            status = status.name
+        metrics["status"] = status or "ready"
         metrics["vectors_count"] = getattr(info, "vectors_count", None)
         metrics["segments_count"] = getattr(info, "segments_count", None)
-    except Exception:
-        pass
+    except Exception as exc:
+        metrics["error"] = str(exc)
+        logger.warning("get_collection failed for %s: %s", collection, exc)
 
     try:
-        count_resp = client.count(collection_name=collection, exact=False)
+        count_resp = await client.count(collection_name=collection, exact=False)
         metrics["points_count"] = getattr(count_resp, "count", None)
-    except Exception:
-        pass
+    except Exception as exc:
+        metrics["error"] = metrics["error"] or str(exc)
+        logger.warning("count query failed for %s: %s", collection, exc)
 
     return metrics
 
@@ -884,6 +985,87 @@ Settings.llm = OpenAICompatibleLLM(
     temperature=0.1,
     context_window=llm_context_window,
 )
+
+
+class ContentFilterPostprocessor(BaseNodePostprocessor):
+    """Drop nodes without usable content."""
+
+    def _postprocess_nodes(self, nodes: List[NodeWithScore], query_bundle: Optional[QueryBundle] = None) -> List[NodeWithScore]:
+        cleaned: List[NodeWithScore] = []
+        for node in nodes:
+            try:
+                inner = getattr(node, "node", None)
+                text = inner.get_content() if inner is not None else getattr(node, "text", "")
+                if text:
+                    cleaned.append(node)
+            except Exception:
+                continue
+        return cleaned
+
+
+class KeywordFilterPostprocessor(BaseNodePostprocessor):
+    """Filter nodes by keyword sets."""
+
+    _any_set: set[str] = PrivateAttr()
+    _all_set: set[str] = PrivateAttr()
+
+    def __init__(self, any_set: set[str], all_set: set[str]):
+        super().__init__()
+        self._any_set = any_set
+        self._all_set = all_set
+
+    def _normalize_keywords(self, node) -> set[str]:
+        metadata = getattr(node, "metadata", {}) or {}
+        keywords = []
+        raw_list = metadata.get("keyword_list")
+        if isinstance(raw_list, list):
+            keywords.extend(raw_list)
+        elif isinstance(raw_list, str):
+            keywords.extend(item.strip() for item in raw_list.split(","))
+        raw_str = metadata.get("keywords")
+        if isinstance(raw_str, str):
+            keywords.extend(item.strip() for item in raw_str.split(","))
+        return {kw.lower() for kw in keywords if kw and kw.strip()}
+
+    def _postprocess_nodes(self, nodes: List[NodeWithScore], query_bundle: Optional[QueryBundle] = None) -> List[NodeWithScore]:
+        if not self._any_set and not self._all_set:
+            return nodes
+        filtered: List[NodeWithScore] = []
+        for node in nodes:
+            keyword_set = self._normalize_keywords(node)
+            if self._any_set and not (keyword_set & self._any_set):
+                continue
+            if self._all_set and not self._all_set.issubset(keyword_set):
+                continue
+            filtered.append(node)
+        return filtered
+
+
+class TimeDecayPostprocessor(BaseNodePostprocessor):
+    """Apply linear time decay to node scores."""
+
+    _decay_rate: float = PrivateAttr()
+
+    def __init__(self, decay_rate: float = 0.005):
+        super().__init__()
+        self._decay_rate = decay_rate
+
+    def _postprocess_nodes(self, nodes: List[NodeWithScore], query_bundle: Optional[QueryBundle] = None) -> List[NodeWithScore]:
+        today = datetime.date.today()
+        for node in nodes:
+            metadata = getattr(node, "metadata", {}) or {}
+            date_str = metadata.get("date")
+            if not date_str:
+                continue
+            try:
+                doc_date = datetime.datetime.strptime(date_str, "%Y-%m-%d").date()
+                delta = (today - doc_date).days
+                if delta > 0 and node.score is not None:
+                    node.score *= 1.0 / (1.0 + self._decay_rate * delta)
+            except Exception:
+                continue
+        nodes.sort(key=lambda x: (x.score or 0.0), reverse=True)
+        return nodes
 
 
 def doc_exists(doc_hash: str) -> bool:

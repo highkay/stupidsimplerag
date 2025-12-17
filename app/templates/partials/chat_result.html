@@ -1,28 +1,54 @@
 {% if error %}
-<div class="card error">
-    <h3>查询失败</h3>
-    <p>{{ error }}</p>
+<div class="alert alert-error shadow-lg">
+    <div>
+        <span class="text-lg font-semibold">查询失败</span>
+        <p class="text-sm">{{ error }}</p>
+    </div>
 </div>
 {% elif result %}
-<div class="card">
-    <h3>回答</h3>
-    <p>{{ result.answer }}</p>
+<div class="card bg-base-100 shadow-xl ring-1 ring-base-200">
+    <div class="card-body space-y-3">
+        <div class="flex items-center justify-between">
+            <h3 class="card-title text-lg">回答</h3>
+            <span class="badge badge-primary badge-outline">LLM</span>
+        </div>
+        <div class="prose max-w-none whitespace-pre-wrap">{{ result.answer }}</div>
+    </div>
 </div>
-<div class="card">
-    <h3>命中切片 ({{ result.sources | length }})</h3>
-    <ul class="sources">
-        {% for src in result.sources %}
-        <li>
-            <strong>{{ src.filename }}</strong>
-            <div class="muted">
-                日期: {{ src.date or "未知" }} · 分数: {{ '%.4f'|format(src.score or 0) }}
+
+<div class="card bg-base-100 shadow-xl ring-1 ring-base-200 mt-4">
+    <div class="card-body space-y-3">
+        <div class="flex items-center justify-between">
+            <h3 class="card-title text-lg">命中切片</h3>
+            <div class="badge badge-outline">{{ result.sources | length }}</div>
+        </div>
+        <div class="space-y-3">
+            {% for src in result.sources %}
+            <div class="rounded-xl border border-base-200 p-4">
+                <div class="flex items-center justify-between gap-2">
+                    <div class="font-semibold">{{ src.filename }}</div>
+                    <div class="badge badge-ghost">Score {{ '%.4f'|format(src.score or 0) }}</div>
+                </div>
+                <div class="text-sm text-base-content/60 mt-1">
+                    日期: {{ src.date or "未知" }}
+                </div>
+                <div class="mt-2 text-sm">{{ src.text }}</div>
+                <div class="mt-2 flex flex-wrap gap-2">
+                    {% if src.keywords %}
+                        {% for kw in src.keywords.split(",") %}
+                        <span class="badge badge-outline badge-sm">{{ kw }}</span>
+                        {% endfor %}
+                    {% else %}
+                        <span class="badge badge-ghost badge-sm">无关键词</span>
+                    {% endif %}
+                </div>
             </div>
-            <div>{{ src.text }}</div>
-            <div class="muted">关键词: {{ src.keywords or "-" }}</div>
-        </li>
-        {% endfor %}
-    </ul>
+            {% endfor %}
+        </div>
+    </div>
 </div>
 {% else %}
-<div class="muted">尚无查询结果</div>
+<div class="card bg-base-100 shadow-lg ring-1 ring-base-200">
+    <div class="card-body text-base-content/70">尚无查询结果，提交一个问题以开始。</div>
+</div>
 {% endif %}

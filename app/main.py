@@ -12,7 +12,9 @@ from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from tenacity import AsyncRetrying, RetryCallState, stop_after_attempt, wait_exponential
 
+from llama_index.core import QueryBundle
 from llama_index.core.schema import TextNode
 from app.core import doc_exists, get_collection_metrics, get_query_engine, insert_nodes
 from app.ingest import compute_doc_hash, process_file
@@ -23,7 +25,7 @@ from app.models import (
     SourceItem,
     TextIngestRequest,
 )
-from app.utils import apply_time_decay, get_node_metadata
+from app.utils import get_node_metadata
 
 app = FastAPI(title="Finance RAG Engine")
 CACHE = TTLCache(maxsize=1000, ttl=3600)
@@ -33,7 +35,7 @@ static_dir = BASE_DIR / "static"
 if static_dir.exists():
     app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
-logger = logging.getLogger("uvicorn.error")
+logger = logging.getLogger(__name__)
 BATCH_INGEST_CONCURRENCY = max(1, int(os.getenv("BATCH_INGEST_CONCURRENCY", "4")))
 INSERT_MAX_RETRIES = max(1, int(os.getenv("INGEST_INSERT_MAX_RETRIES", "3")))
 INSERT_RETRY_BACKOFF = float(os.getenv("INGEST_INSERT_RETRY_BACKOFF", "2.0"))
@@ -48,6 +50,8 @@ def _cache_key(body: ChatRequest) -> str:
         body.filename_contains or "",
         ",".join(body.keywords_any or []),
         ",".join(body.keywords_all or []),
+        str(body.skip_rerank),
+        str(body.skip_generation),
     ]
     raw = "|".join(parts)
     return hashlib.md5(raw.encode()).hexdigest()
@@ -130,11 +134,24 @@ def _parse_keywords(raw: Optional[str]) -> Optional[List[str]]:
     return cleaned or None
 
 
-def _normalize_keyword_set(values: Optional[List[str]]) -> set[str]:
-    if not values:
-        return set()
-    return {value.strip().lower() for value in values if value and value.strip()}
+def _parse_bool(raw: Optional[str]) -> bool:
+    if raw is None:
+        return False
+    value = str(raw).strip().lower()
+    return value in ("1", "true", "on", "yes")
 
+
+def _log_retry(retry_state: RetryCallState) -> None:
+    """Tenacity hook for logging retry attempts with backoff."""
+    exc = retry_state.outcome.exception() if retry_state.outcome else None
+    sleep = retry_state.next_action.sleep if retry_state.next_action else 0
+    logger.warning(
+        "insert_nodes attempt %d/%d failed: %s -- retrying in %.1fs",
+        retry_state.attempt_number,
+        INSERT_MAX_RETRIES,
+        exc,
+        sleep,
+    )
 
 def _is_htmx(request: Request) -> bool:
     return request.headers.get("hx-request") == "true"
@@ -172,19 +189,17 @@ def _node_keyword_set(node) -> set[str]:
     return {kw.lower() for kw in keywords if kw and kw.strip()}
 
 
-def _filter_nodes_by_keywords(nodes, any_set, all_set):
-    if not any_set and not all_set:
-        return nodes
-
-    filtered = []
-    for node in nodes:
-        keyword_set = _node_keyword_set(node)
-        if any_set and not (keyword_set & any_set):
-            continue
-        if all_set and not all_set.issubset(keyword_set):
-            continue
-        filtered.append(node)
-    return filtered
+def _generate_answer_from_nodes(nodes: List, limit: int = 3) -> str:
+    """Fallback answer when generation is skipped: stitch top snippets."""
+    snippets = []
+    for node in nodes[:limit]:
+        metadata = get_node_metadata(node)
+        text = metadata.get("original_text") or getattr(node, "text", "") or ""
+        if text:
+            snippets.append(text[:200])
+    if not snippets:
+        return "Generation skipped; see sources for details."
+    return "\n\n".join(snippets)
 
 
 async def _process_and_insert_content(
@@ -242,45 +257,32 @@ async def _process_and_insert_content(
     return nodes, False, doc_hash
 
 
+
 async def _insert_nodes_with_retry(nodes: List[TextNode]) -> None:
     if not nodes:
         return
-    last_error: Exception | None = None
-    for attempt in range(1, INSERT_MAX_RETRIES + 1):
-        try:
-            await asyncio.to_thread(insert_nodes, nodes)
-            if attempt > 1:
-                logger.info(
-                    "insert_nodes succeeded after retry attempt=%d node_count=%d",
-                    attempt,
-                    len(nodes),
-                )
-            return
-        except Exception as exc:
-            last_error = exc
-            if attempt >= INSERT_MAX_RETRIES:
-                logger.exception(
-                    "insert_nodes failed after %d attempts", INSERT_MAX_RETRIES
-                )
-                raise
-            delay = INSERT_RETRY_BACKOFF * attempt
-            logger.warning(
-                "insert_nodes attempt %d/%d failed: %s -- retrying in %.1fs",
-                attempt,
-                INSERT_MAX_RETRIES,
-                exc,
-                delay,
+    async for attempt in AsyncRetrying(
+        stop=stop_after_attempt(INSERT_MAX_RETRIES),
+        wait=wait_exponential(
+            multiplier=INSERT_RETRY_BACKOFF,
+            min=INSERT_RETRY_BACKOFF,
+            max=INSERT_RETRY_BACKOFF * 4,
+        ),
+        reraise=True,
+        before_sleep=_log_retry,
+    ):
+        with attempt:
+            await insert_nodes(nodes)
+            logger.info(
+                "insert_nodes succeeded attempt=%d node_count=%d",
+                attempt.retry_state.attempt_number,
+                len(nodes),
             )
-            await asyncio.sleep(delay)
-    if last_error:
-        raise last_error
 
 
-async def _ingest_single_upload(
-    upload: UploadFile, semaphore: asyncio.Semaphore
-) -> IngestResponse:
-    async with semaphore:
-        logger.info("Batch ingest processing file=%s", upload.filename)
+async def _ingest_single_upload(upload: UploadFile) -> IngestResponse:
+    logger.info("Batch ingest processing file=%s", upload.filename)
+    try:
         raw_bytes = await upload.read()
         logger.debug(
             "Read batch upload file=%s bytes=%d",
@@ -305,6 +307,11 @@ async def _ingest_single_upload(
             filename=upload.filename,
             doc_hash=doc_hash,
         )
+    finally:
+        try:
+            await upload.close()
+        except Exception:
+            pass
 
 
 @app.post("/ingest", response_model=IngestResponse)
@@ -350,38 +357,63 @@ async def ingest_batch(files: List[UploadFile] = File(...)) -> List[IngestRespon
         len(files),
         BATCH_INGEST_CONCURRENCY,
     )
-    semaphore = asyncio.Semaphore(BATCH_INGEST_CONCURRENCY)
-    tasks = [_ingest_single_upload(upload, semaphore) for upload in files]
-    raw_results = await asyncio.gather(*tasks, return_exceptions=True)
-    responses: List[IngestResponse] = []
-    success_count = 0
-    for upload, outcome in zip(files, raw_results):
-        if isinstance(outcome, Exception):
-            detail = getattr(outcome, "detail", str(outcome))
-            logger.error(
-                "Batch ingest failed file=%s error=%s",
-                upload.filename,
-                detail,
+    concurrency = BATCH_INGEST_CONCURRENCY
+    responses: List[Optional[IngestResponse]] = [None] * len(files)
+    in_flight: set[asyncio.Task] = set()
+
+    async def _runner(idx: int, upload: UploadFile) -> tuple[int, IngestResponse]:
+        try:
+            result = await _ingest_single_upload(upload)
+            return idx, result
+        except Exception as exc:  # pragma: no cover - defensive logging
+            detail = getattr(exc, "detail", str(exc))
+            logger.error("Batch ingest failed file=%s error=%s", upload.filename, detail)
+            return idx, IngestResponse(
+                status="error",
+                chunks=0,
+                filename=upload.filename,
+                error=str(detail),
             )
-            responses.append(
-                IngestResponse(
-                    status="error",
-                    chunks=0,
-                    filename=upload.filename,
-                    error=str(detail),
-                )
+
+    # Prime initial workers up to the concurrency limit
+    next_index = 0
+    while next_index < len(files) and len(in_flight) < concurrency:
+        task = asyncio.create_task(_runner(next_index, files[next_index]))
+        in_flight.add(task)
+        next_index += 1
+
+    while in_flight:
+        done, in_flight = await asyncio.wait(
+            in_flight, return_when=asyncio.FIRST_COMPLETED
+        )
+        for task in done:
+            idx, result = await task
+            responses[idx] = result
+            if next_index < len(files):
+                task = asyncio.create_task(_runner(next_index, files[next_index]))
+                in_flight.add(task)
+                next_index += 1
+
+    # Fill any missing (should not happen) with error placeholders
+    for i, value in enumerate(responses):
+        if value is None:
+            responses[i] = IngestResponse(
+                status="error",
+                chunks=0,
+                filename=files[i].filename if i < len(files) else f"unknown_{i}",
+                error="unknown failure",
             )
-        else:
-            responses.append(outcome)
-            if outcome.status.lower() == "ok":
-                success_count += 1
+
+    success_count = sum(
+        1 for item in responses if item and item.status and item.status.lower() == "ok"
+    )
     logger.info(
         "Batch ingest finished total_files=%d succeeded=%d failed=%d",
         len(responses),
         success_count,
         len(responses) - success_count,
     )
-    return responses
+    return [resp for resp in responses if resp is not None]
 
 
 @app.post("/ingest/text", response_model=IngestResponse)
@@ -457,44 +489,41 @@ async def chat_api(req: ChatRequest) -> ChatResponse:
         end_date=req.end_date,
         filename=req.filename,
         filename_contains=req.filename_contains,
+        skip_rerank=req.skip_rerank,
+        keywords_any=req.keywords_any,
+        keywords_all=req.keywords_all,
     )
-    response = engine.query(req.query)
-    source_nodes = getattr(response, "source_nodes", []) or []
-    logger.info("Raw retrieved nodes=%d", len(source_nodes))
 
-    any_set = _normalize_keyword_set(req.keywords_any)
-    all_set = _normalize_keyword_set(req.keywords_all)
-    filtered_nodes = _filter_nodes_by_keywords(source_nodes, any_set, all_set)
-    if len(filtered_nodes) != len(source_nodes):
-        logger.info(
-            "Keyword filters applied any=%d all=%d dropped=%d nodes",
-            len(any_set),
-            len(all_set),
-            len(source_nodes) - len(filtered_nodes),
-        )
-    source_nodes = filtered_nodes
-    logger.info("Nodes after keyword filtering=%d", len(source_nodes))
+    if req.skip_generation:
+        retriever = getattr(engine, "_retriever", None)
+        if retriever is None:
+            raise HTTPException(status_code=500, detail="Retriever unavailable")
+        query_bundle = QueryBundle(req.query)
+        source_nodes = await asyncio.to_thread(retriever.retrieve, query_bundle)
+        postprocessors = getattr(engine, "_node_postprocessors", []) or []
+        for processor in postprocessors:
+            try:
+                source_nodes = processor.postprocess_nodes(source_nodes, query_bundle)
+            except Exception as exc:
+                logger.warning("Postprocessor failed, skipping: %s", exc)
+        response_answer = _generate_answer_from_nodes(source_nodes)
+    else:
+        response = await asyncio.to_thread(engine.query, req.query)
+        source_nodes = getattr(response, "source_nodes", []) or []
+        response_answer = str(response)
 
-    decay_rate = float(os.getenv("TIME_DECAY_RATE", "0.005"))
-    nodes = apply_time_decay(source_nodes, decay_rate=decay_rate)
     final_k = int(os.getenv("FINAL_TOP_K", "10"))
-    result_nodes = nodes[:final_k]
-    logger.info(
-        "Time decay rate=%s applied; nodes_post_decay=%d final_top_k=%d",
-        decay_rate,
-        len(nodes),
-        final_k,
-    )
+    result_nodes = source_nodes[:final_k]
 
     result_payload: Dict = {
-        "answer": str(response),
+        "answer": response_answer,
         "sources": [_node_to_source(node).dict() for node in result_nodes],
     }
     CACHE[key] = result_payload
     top_filenames = [item["filename"] for item in result_payload["sources"]]
     logger.info(
         "Chat response final_nodes=%d returned=%d top_files=%s answer_len=%d",
-        len(nodes),
+        len(source_nodes),
         len(result_nodes),
         top_filenames,
         len(result_payload["answer"]),
@@ -504,7 +533,7 @@ async def chat_api(req: ChatRequest) -> ChatResponse:
 
 @app.get("/", response_class=HTMLResponse)
 async def dashboard_page(request: Request) -> HTMLResponse:
-    metrics = get_collection_metrics()
+    metrics = await get_collection_metrics()
     cache_stats = {
         "entries": len(CACHE),
         "maxsize": CACHE.maxsize,
@@ -518,6 +547,7 @@ async def dashboard_page(request: Request) -> HTMLResponse:
         "top_k": int(os.getenv("TOP_K_RETRIEVAL", "100")),
         "top_n_rerank": int(os.getenv("TOP_N_RERANK", "20")),
         "final_top_k": int(os.getenv("FINAL_TOP_K", "10")),
+        "batch_concurrency": BATCH_INGEST_CONCURRENCY,
     }
     context = {
         "request": request,
@@ -585,6 +615,8 @@ async def chat_via_ui(
     filename_contains: Optional[str] = Form(None),
     keywords_any: Optional[str] = Form(None),
     keywords_all: Optional[str] = Form(None),
+    skip_rerank: Optional[str] = Form(None),
+    skip_generation: Optional[str] = Form(None),
 ) -> HTMLResponse:
     req_body = ChatRequest(
         query=query,
@@ -594,6 +626,8 @@ async def chat_via_ui(
         filename_contains=filename_contains or None,
         keywords_any=_parse_keywords(keywords_any),
         keywords_all=_parse_keywords(keywords_all),
+        skip_rerank=_parse_bool(skip_rerank),
+        skip_generation=_parse_bool(skip_generation),
     )
     is_htmx = _is_htmx(request)
     template_name = "partials/chat_result.html" if is_htmx else "chat.html"

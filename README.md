@@ -1,6 +1,6 @@
 # stupidsimplerag
 
-金融级单机 RAG，理念是“重预处理，轻运行时”：入库阶段用 LLM 生成摘要/表格解读/同义词，查询阶段依靠 Qdrant 混合检索 + API Rerank + 应用层时间衰减拿到稳定的 Finance Answer。
+专用、高效、节省资源的单机 RAG：重预处理，轻运行时。入库阶段用 LLM 生成摘要/表格解读/同义词，查询阶段依靠 Qdrant 混合检索 + API Rerank + 应用层时间衰减拿到稳态回答。
 
 ## 快速启动
 
@@ -8,10 +8,15 @@
 git clone <repo>
 cd stupidsimplerag
 cp .env.example .env  # 补齐模型、Qdrant 配置
-docker-compose up -d --build
+docker compose up -d   # 默认使用 highkay/stupidsimplerag:latest 镜像
 ```
 
-容器会拉起 `qdrant` 和 `api`，FastAPI 默认监听 `localhost:8000`。
+容器会拉起 `qdrant` 和 `api`，FastAPI/Gunicorn 默认监听 `localhost:8005` (转发到容器 8000)。
+
+直接用 Docker 运行（不含 Qdrant）：
+```bash
+docker run --env-file .env -p 8000:8000 highkay/stupidsimplerag:latest
+```
 
 ## HTTP API 一览
 
@@ -75,6 +80,8 @@ docker-compose up -d --build
 | `filename_contains` | `string` | 否 | 对文件名做大小写不敏感的包含匹配。 |
 | `keywords_any` | `string[]` | 否 | 仅返回命中任意关键词的切片。 |
 | `keywords_all` | `string[]` | 否 | 仅返回同时覆盖所有关键词的切片。 |
+| `skip_rerank` | `bool` | 否 | 跳过 Rerank，直接返回相似度排序。 |
+| `skip_generation` | `bool` | 否 | 跳过回答生成，仅返回切片。 |
 
 - **响应 (`ChatResponse`)**
 
@@ -112,7 +119,12 @@ curl -X POST http://localhost:8000/ingest/text \
 # 检索查询
 curl -X POST http://localhost:8000/chat \
   -H "Content-Type: application/json" \
-  -d '{"query":"英伟达最新财报表现","start_date":"2025-01-01"}'
+  -d '{
+    "query":"英伟达最新财报表现",
+    "start_date":"2025-01-01",
+    "skip_rerank": true,
+    "skip_generation": true
+  }'
 ```
 
 ## 工作流速览
@@ -146,6 +158,11 @@ curl -X POST http://localhost:8000/chat -H "Content-Type: application/json" -d '
 - 连接托管 Qdrant 时可用 `curl -X GET <QDRANT_URL>` + `api-key` 快速做健康检查。
 - 离线批量导入：`python offline_ingest.py --dir ./docs --api-base http://127.0.0.1:8000 --batch-size 4`，递归读取 `.md/.txt` 并调用 `/ingest` 或 `/ingest/batch`，可用 `--dry-run` 预览。
 - 重置 Qdrant 集合：`python reset_qdrant.py -y` 会按 `.env` 中的 `COLLECTION_NAME` 与 `EMBEDDING_DIM` 删除并重建集合（危险操作，务必确认目标环境）。
+
+## CI / 镜像发布
+
+- GitHub Actions (`.github/workflows/docker-publish.yml`) 在 `main` 推送时自动构建并推送镜像到 Docker Hub `highkay/stupidsimplerag`（标签：`latest` 与 commit `sha`）。需要仓库 secrets：`DOCKERHUB_USERNAME`、`DOCKERHUB_TOKEN`。
+- 生产容器使用 `gunicorn -k uvicorn.workers.UvicornWorker`，默认 `GUNICORN_WORKERS=2`、`GUNICORN_THREADS=1`，可在运行时通过环境变量覆盖。
 
 ## 了解更多
 

@@ -19,6 +19,12 @@ class ChatRequest(BaseModel):
     keywords_all: Optional[List[str]] = Field(
         None, description="Return slices that contain all of these keywords"
     )
+    skip_rerank: bool = Field(
+        False, description="If true, skip rerank and return similarity results directly"
+    )
+    skip_generation: bool = Field(
+        False, description="If true, skip LLM generation and only return retrieved sources"
+    )
 
 
 class SourceItem(BaseModel):

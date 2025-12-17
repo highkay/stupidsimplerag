@@ -1,6 +1,7 @@
 -i https://pypi.tuna.tsinghua.edu.cn/simple
 fastapi
 uvicorn
+gunicorn
 python-multipart
 llama-index-core
 llama-index-llms-openai
@@ -14,6 +15,8 @@ pydantic
 httpx
 python-dateutil
 cachetools
+loguru
+tenacity
 jinja2
 python-dotenv
 openai

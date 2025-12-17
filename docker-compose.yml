@@ -10,12 +10,10 @@ services:
     restart: always
 
   api:
-    build: .
-    container_name: rag_api
+    image: highkay/stupidsimplerag:latest
+    # 若需本地源码热更，可改为 build: . 并挂载 ./app
     ports:
       - "8005:8000"
-    volumes:
-      - ./:/app
     env_file: .env
     depends_on:
       - qdrant
