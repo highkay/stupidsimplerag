@@ -516,6 +516,99 @@ class APIReranker(BaseNodePostprocessor):
             return nodes[: self.top_n]
         return self._call_rerank_api(nodes, query_bundle)
 
+    async def _apostprocess_nodes(
+        self, nodes: List[NodeWithScore], query_bundle: Optional[QueryBundle] = None
+    ) -> List[NodeWithScore]:
+        if not nodes or not query_bundle:
+            return nodes[: self.top_n]
+        return await self._acall_rerank_api(nodes, query_bundle)
+
+    async def _acall_rerank_api(
+        self,
+        nodes: List[NodeWithScore],
+        query_bundle: QueryBundle,
+    ) -> List[NodeWithScore]:
+        if not nodes or not self.model:
+            return nodes[: self.top_n]
+        if self._use_rerank_endpoint:
+            return await self._acall_rerank_endpoint(nodes, query_bundle)
+        if not self._client:
+            return nodes[: self.top_n]
+        return await self._acall_chat_rerank(nodes, query_bundle)
+
+    async def _acall_rerank_endpoint(
+        self, nodes: List[NodeWithScore], query_bundle: QueryBundle
+    ) -> List[NodeWithScore]:
+        headers = {"Content-Type": "application/json"}
+        if self._api_key:
+            headers["Authorization"] = f"Bearer {self._api_key}"
+        payload = {
+            "model": self.model,
+            "query": query_bundle.query_str,
+            "documents": [n.node.get_content() for n in nodes],
+            "top_n": self.top_n,
+            "return_documents": self.return_documents,
+        }
+        try:
+            data = await self._aperform_rerank_request(payload, headers)
+            results = self._extract_rerank_items(data)
+        except Exception as exc:
+            logger.warning(
+                "Async rerank request failed after retries (endpoint=%s): %s",
+                self.api_url,
+                exc,
+            )
+            return nodes[: self.top_n]
+        return self._apply_results(nodes, results)
+
+    async def _acall_chat_rerank(
+        self, nodes: List[NodeWithScore], query_bundle: QueryBundle
+    ) -> List[NodeWithScore]:
+        messages = self._build_messages(query_bundle.query_str, nodes)
+        try:
+            # Note: Assuming self._client has an async interface or we use a separate AsyncOpenAI client.
+            # If self._client is the sync OpenAI client, we need to handle this.
+            # Given the context, we should probably construct an AsyncOpenAI client if needed,
+            # or check if we can reuse the configuration.
+            # For now, let's assume we can use a temporary AsyncOpenAI client or similar if not available.
+            # However, typically LlamaIndex or OpenAI clients are either sync or async.
+            # We will use a dedicated AsyncOpenAI client for this method if we can't easily reuse.
+            
+            # Re-initializing AsyncOpenAI client to ensure async support
+            from openai import AsyncOpenAI
+            async_client = AsyncOpenAI(
+                api_key=self._api_key,
+                base_url=self._base_url,
+                timeout=self.timeout,
+            )
+            response = await async_client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                temperature=0.0,
+            )
+        except Exception as exc:
+            logger.warning("Async rerank request failed: %s", exc)
+            return nodes[: self.top_n]
+
+        results = self._parse_rerank_response(response, len(nodes))
+        return self._apply_results(nodes, results)
+
+    @retry(
+        reraise=True,
+        stop=stop_after_attempt(RERANK_MAX_RETRIES),
+        wait=wait_exponential(
+            multiplier=RERANK_RETRY_BACKOFF,
+            min=RERANK_RETRY_BACKOFF,
+            max=RERANK_RETRY_BACKOFF * 4,
+        ),
+        before_sleep=_log_rerank_retry,
+    )
+    async def _aperform_rerank_request(self, payload: dict, headers: dict) -> dict:
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            response = await client.post(self.api_url, json=payload, headers=headers)
+            response.raise_for_status()
+            return response.json()
+
     @retry(
         reraise=True,
         stop=stop_after_attempt(RERANK_MAX_RETRIES),
@@ -806,7 +899,7 @@ async def insert_nodes(nodes: List[TextNode]) -> None:
     logger.info("Inserting %d nodes into Qdrant (will trigger embedding)", len(nodes))
     start = time.perf_counter()
     index = _get_index()
-    await index.insert_nodes_async(nodes)
+    await index.ainsert_nodes(nodes)
     elapsed = time.perf_counter() - start
     logger.debug(
         "Qdrant insert complete collection=%s count=%d duration=%.2fs",

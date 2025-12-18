@@ -499,16 +499,16 @@ async def chat_api(req: ChatRequest) -> ChatResponse:
         if retriever is None:
             raise HTTPException(status_code=500, detail="Retriever unavailable")
         query_bundle = QueryBundle(req.query)
-        source_nodes = await asyncio.to_thread(retriever.retrieve, query_bundle)
+        source_nodes = await retriever.aretrieve(query_bundle)
         postprocessors = getattr(engine, "_node_postprocessors", []) or []
         for processor in postprocessors:
             try:
-                source_nodes = processor.postprocess_nodes(source_nodes, query_bundle)
+                source_nodes = await processor.apostprocess_nodes(source_nodes, query_bundle)
             except Exception as exc:
                 logger.warning("Postprocessor failed, skipping: %s", exc)
         response_answer = _generate_answer_from_nodes(source_nodes)
     else:
-        response = await asyncio.to_thread(engine.query, req.query)
+        response = await engine.aquery(req.query)
         source_nodes = getattr(response, "source_nodes", []) or []
         response_answer = str(response)
 

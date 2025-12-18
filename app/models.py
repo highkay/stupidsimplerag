@@ -1,6 +1,6 @@
 from typing import List, Optional
 
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, field_validator
 
 
 class ChatRequest(BaseModel):
@@ -58,7 +58,8 @@ class LLMAnalysis(BaseModel):
     table_narrative: str = ""
     keywords: List[str] = Field(default_factory=list)
 
-    @validator("keywords", pre=True, always=True)
+    @field_validator("keywords", mode="before")
+    @classmethod
     def normalize_keywords(cls, value):
         if not value:
             return []
