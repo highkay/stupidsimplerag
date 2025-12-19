@@ -21,6 +21,8 @@ def compute_doc_hash(content: str) -> str:
 _llm_context_window = int(os.getenv("LLM_CONTEXT_WINDOW", "8192"))
 _llm_retry_attempts = int(os.getenv("LLM_MAX_RETRIES", "3"))
 _llm_retry_backoff = float(os.getenv("LLM_RETRY_BACKOFF", "1.5"))
+_llm_concurrency = int(os.getenv("LLM_CONCURRENCY", "10"))
+_llm_semaphore = asyncio.Semaphore(_llm_concurrency)
 
 extractor_llm = OpenAICompatibleLLM(
     model=os.getenv("LLM_MODEL"),
@@ -31,12 +33,13 @@ extractor_llm = OpenAICompatibleLLM(
 
 chunker = TokenChunker(chunk_size=512, chunk_overlap=50)
 logger.debug(
-    "Initialized TokenChunker chunk_size=%s chunk_overlap=%s llm_context=%d retries=%d backoff=%.2f",
+    "Initialized TokenChunker chunk_size=%s chunk_overlap=%s llm_context=%d retries=%d backoff=%.2f concurrency=%d",
     getattr(chunker, "chunk_size", "unknown"),
     getattr(chunker, "chunk_overlap", "unknown"),
     _llm_context_window,
     _llm_retry_attempts,
     _llm_retry_backoff,
+    _llm_concurrency,
 )
 
 
@@ -76,48 +79,49 @@ async def analyze_document(text: str) -> LLMAnalysis:
 ```
 """
     last_error: Exception | None = None
-    for attempt in range(1, _llm_retry_attempts + 1):
-        attempt_start = time.perf_counter()
-        try:
-            logger.debug(
-                "Analyzing document chunk len=%d attempt=%d/%d",
-                len(context),
-                attempt,
-                _llm_retry_attempts,
-            )
-            response = await extractor_llm.acomplete(prompt)
-            content = getattr(response, "text", str(response)).strip()
-            content = _strip_code_fence(content)
-            data = json.loads(content)
-            analysis = LLMAnalysis.model_validate(data)
-            duration = time.perf_counter() - attempt_start
-            logger.debug(
-                "Analyzer succeeded attempt=%d duration=%.2fs summary_len=%d table_len=%d keywords=%d",
-                attempt,
-                duration,
-                len(analysis.summary),
-                len(analysis.table_narrative),
-                len(analysis.keywords or []),
-            )
-            return analysis
-        except Exception as exc:
-            last_error = exc
-            duration = time.perf_counter() - attempt_start
-            if attempt >= _llm_retry_attempts:
-                logger.exception(
-                    "Analyzer failed after %d attempts duration=%.2fs", attempt, duration
+    async with _llm_semaphore:
+        for attempt in range(1, _llm_retry_attempts + 1):
+            attempt_start = time.perf_counter()
+            try:
+                logger.debug(
+                    "Analyzing document chunk len=%d attempt=%d/%d",
+                    len(context),
+                    attempt,
+                    _llm_retry_attempts,
                 )
-                break
-            delay = _llm_retry_backoff * attempt
-            logger.warning(
-                "Analyzer attempt %d/%d failed in %.2fs: %s -- retrying in %.1fs",
-                attempt,
-                _llm_retry_attempts,
-                duration,
-                exc,
-                delay,
-            )
-            await asyncio.sleep(delay)
+                response = await extractor_llm.acomplete(prompt)
+                content = getattr(response, "text", str(response)).strip()
+                content = _strip_code_fence(content)
+                data = json.loads(content)
+                analysis = LLMAnalysis.model_validate(data)
+                duration = time.perf_counter() - attempt_start
+                logger.debug(
+                    "Analyzer succeeded attempt=%d duration=%.2fs summary_len=%d table_len=%d keywords=%d",
+                    attempt,
+                    duration,
+                    len(analysis.summary),
+                    len(analysis.table_narrative),
+                    len(analysis.keywords or []),
+                )
+                return analysis
+            except Exception as exc:
+                last_error = exc
+                duration = time.perf_counter() - attempt_start
+                if attempt >= _llm_retry_attempts:
+                    logger.exception(
+                        "Analyzer failed after %d attempts duration=%.2fs", attempt, duration
+                    )
+                    break
+                delay = _llm_retry_backoff * attempt
+                logger.warning(
+                    "Analyzer attempt %d/%d failed in %.2fs: %s -- retrying in %.1fs",
+                    attempt,
+                    _llm_retry_attempts,
+                    duration,
+                    exc,
+                    delay,
+                )
+                await asyncio.sleep(delay)
     logger.debug(
         "Analyzer returning empty payload after failures last_error=%s", last_error
     )

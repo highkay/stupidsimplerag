@@ -16,7 +16,7 @@ from tenacity import AsyncRetrying, RetryCallState, stop_after_attempt, wait_exp
 
 from llama_index.core import QueryBundle
 from llama_index.core.schema import TextNode
-from app.core import doc_exists, get_collection_metrics, get_query_engine, insert_nodes
+from app.core import adoc_exists, get_collection_metrics, get_query_engine, insert_nodes
 from app.ingest import compute_doc_hash, process_file
 from app.models import (
     ChatRequest,
@@ -37,6 +37,7 @@ if static_dir.exists():
 
 logger = logging.getLogger(__name__)
 BATCH_INGEST_CONCURRENCY = max(1, int(os.getenv("BATCH_INGEST_CONCURRENCY", "4")))
+MAX_BATCH_FILES = max(1, int(os.getenv("BATCH_MAX_FILES", "20")))
 INSERT_MAX_RETRIES = max(1, int(os.getenv("INGEST_INSERT_MAX_RETRIES", "3")))
 INSERT_RETRY_BACKOFF = float(os.getenv("INGEST_INSERT_RETRY_BACKOFF", "2.0"))
 
@@ -87,10 +88,7 @@ def _parse_iso_date(raw: str) -> Optional[str]:
     return dt.date().isoformat()
 
 
-def _extract_upload_date(upload: UploadFile) -> Optional[str]:
-    if not upload:
-        return None
-    header_value = upload.headers.get("x-file-mtime")
+def _extract_date_header(header_value: Optional[str], filename: str) -> Optional[str]:
     if not header_value:
         return None
     date_str = _parse_epoch_date(header_value) or _parse_iso_date(header_value)
@@ -98,15 +96,21 @@ def _extract_upload_date(upload: UploadFile) -> Optional[str]:
         logger.warning(
             "Failed to parse X-File-Mtime header=%r for file=%s",
             header_value,
-            upload.filename,
+            filename,
         )
     else:
         logger.debug(
             "Resolved ingest date %s from file timestamp header for %s",
             date_str,
-            upload.filename,
+            filename,
         )
     return date_str
+
+
+def _extract_upload_date(upload: UploadFile) -> Optional[str]:
+    if not upload:
+        return None
+    return _extract_date_header(upload.headers.get("x-file-mtime"), upload.filename)
 
 
 def _decode_upload_bytes(raw_bytes: Optional[bytes], filename: str) -> str:
@@ -217,7 +221,7 @@ async def _process_and_insert_content(
         content_len,
         doc_hash,
     )
-    if doc_exists(doc_hash):
+    if await adoc_exists(doc_hash):
         logger.info(
             "Skipping ingest for file=%s doc_hash=%s (already exists)", filename, doc_hash
         )
@@ -295,18 +299,19 @@ async def _ingest_single_upload(upload: UploadFile) -> IngestResponse:
             upload.filename, content, ingest_date
         )
         status = "skipped" if skipped else "ok"
-        logger.info(
-            "Batch ingest processed file=%s status=%s chunks=%d",
-            upload.filename,
-            status,
-            len(nodes),
-        )
-        return IngestResponse(
+        result = IngestResponse(
             status=status,
             chunks=len(nodes),
             filename=upload.filename,
             doc_hash=doc_hash,
         )
+        logger.info(
+            "Batch ingest processed file=%s status=%s chunks=%d",
+            upload.filename,
+            result.status,
+            result.chunks,
+        )
+        return result
     finally:
         try:
             await upload.close()
@@ -344,6 +349,11 @@ async def ingest_api(file: UploadFile = File(...)) -> IngestResponse:
 async def ingest_batch(files: List[UploadFile] = File(...)) -> List[IngestResponse]:
     if not files:
         raise HTTPException(status_code=400, detail="At least one file is required")
+    if len(files) > MAX_BATCH_FILES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Too many files in one batch ({len(files)}); max allowed is {MAX_BATCH_FILES}. Please split the upload.",
+        )
 
     for upload in files:
         if not (upload.filename.endswith(".md") or upload.filename.endswith(".txt")):

@@ -87,6 +87,10 @@ class OpenAICompatibleEmbedding(BaseEmbedding):
         self._timeout = timeout
         self._max_retries = EMBEDDING_MAX_RETRIES
         self._retry_backoff = EMBEDDING_RETRY_BACKOFF
+        
+        # Persistent clients for connection pooling
+        self._client = httpx.Client(timeout=self._timeout)
+        self._aclient = httpx.AsyncClient(timeout=self._timeout)
 
     def _headers(self) -> dict:
         headers = {"Content-Type": "application/json"}
@@ -100,82 +104,75 @@ class OpenAICompatibleEmbedding(BaseEmbedding):
             payload["dimensions"] = self._dimensions
         url = f"{self._api_base}/embeddings"
         last_error: Exception | None = None
-        if logger.isEnabledFor(logging.DEBUG):
-            logger.debug(
-                "Embedding request model=%s url=%s batch_size=%d dim=%s first_chunk_len=%s",
-                self._model,
-                url,
-                len(inputs),
-                self._dimensions or "full",
-                len(inputs[0]) if inputs else 0,
-            )
+        
         for attempt in range(1, self._max_retries + 1):
             try:
-                response = httpx.post(
+                response = self._client.post(
                     url,
                     json=payload,
                     headers=self._headers(),
-                    timeout=self._timeout,
                 )
                 response.raise_for_status()
                 result = response.json()
                 data = result.get("data", [])
-                if logger.isEnabledFor(logging.INFO):
-                    vector_dim = 0
-                    preview = []
-                    if data:
-                        vector = data[0].get("embedding") or []
-                        vector_dim = len(vector)
-                        preview = vector[: min(len(vector), 4)]
-                    logger.info(
-                        "Embedding success model=%s batch=%d dim=%s preview=%s",
-                        self._model,
-                        len(data),
-                        vector_dim or "unknown",
-                        preview,
-                    )
-                if logger.isEnabledFor(logging.DEBUG):
-                    preview = []
-                    if data:
-                        vector = data[0].get("embedding") or []
-                        preview = vector[: min(len(vector), 8)]
-                    logger.debug(
-                        "Embedding response success attempt=%d vectors=%d usage=%s preview=%s",
-                        attempt,
-                        len(data),
-                        result.get("usage"),
-                        preview,
-                    )
                 return data
             except Exception as exc:
                 last_error = exc
                 if attempt >= self._max_retries:
-                    logger.error(
-                        "Embedding request failed after %d attempts: %s",
-                        attempt,
-                        exc,
-                    )
+                    logger.error("Embedding request failed after %d attempts: %s", attempt, exc)
                     raise
                 delay = self._retry_backoff * attempt
-                logger.warning(
-                    "Embedding request attempt %d/%d failed: %s -- retrying in %.1fs",
-                    attempt,
-                    self._max_retries,
-                    exc,
-                    delay,
-                )
                 time.sleep(delay)
         raise last_error or RuntimeError("Embedding request failed")
+
+    async def _asend_embedding_request(self, inputs: List[str]) -> List[dict]:
+        payload: dict = {"model": self._model, "input": inputs}
+        if self._dimensions:
+            payload["dimensions"] = self._dimensions
+        url = f"{self._api_base}/embeddings"
+        last_error: Exception | None = None
+
+        for attempt in range(1, self._max_retries + 1):
+            try:
+                response = await self._aclient.post(
+                    url,
+                    json=payload,
+                    headers=self._headers(),
+                )
+                response.raise_for_status()
+                result = response.json()
+                data = result.get("data", [])
+                return data
+            except Exception as exc:
+                last_error = exc
+                if attempt >= self._max_retries:
+                    logger.error("Async embedding request failed after %d attempts: %s", attempt, exc)
+                    raise
+                delay = self._retry_backoff * attempt
+                await asyncio.sleep(delay)
+        raise last_error or RuntimeError("Async embedding request failed")
 
     def _embedding_request(self, inputs: List[str]) -> List[List[float]]:
         data = self._send_embedding_request(inputs)
         if len(data) == len(inputs):
             return [item["embedding"] for item in data]
-
-        # 后端只支持单文本请求时，回退为逐条发送，避免批量 embedding 丢失
+        
         embeddings: List[List[float]] = []
         for text in inputs:
             single_data = self._send_embedding_request([text])
+            if not single_data:
+                raise ValueError("Embedding API returned empty response for single input")
+            embeddings.append(single_data[0]["embedding"])
+        return embeddings
+
+    async def _aembedding_request(self, inputs: List[str]) -> List[List[float]]:
+        data = await self._asend_embedding_request(inputs)
+        if len(data) == len(inputs):
+            return [item["embedding"] for item in data]
+        
+        embeddings: List[List[float]] = []
+        for text in inputs:
+            single_data = await self._asend_embedding_request([text])
             if not single_data:
                 raise ValueError("Embedding API returned empty response for single input")
             embeddings.append(single_data[0]["embedding"])
@@ -185,16 +182,19 @@ class OpenAICompatibleEmbedding(BaseEmbedding):
         return self._embedding_request([query])[0]
 
     async def _aget_query_embedding(self, query: str) -> List[float]:
-        return self._get_query_embedding(query)
+        return (await self._aembedding_request([query]))[0]
 
     def _get_text_embedding(self, text: str) -> List[float]:
         return self._embedding_request([text])[0]
 
     async def _aget_text_embedding(self, text: str) -> List[float]:
-        return self._get_text_embedding(text)
+        return (await self._aembedding_request([text]))[0]
 
     def _get_text_embeddings(self, texts: List[str]) -> List[List[float]]:
         return self._embedding_request(texts)
+    
+    async def _aget_text_embeddings(self, texts: List[str]) -> List[List[float]]:
+        return await self._aembedding_request(texts)
 
 
 class FixedDimensionEmbedding(BaseEmbedding):
@@ -306,6 +306,68 @@ if logger.isEnabledFor(logging.INFO):
     )
 
 
+_RERANK_HTTP_CLIENT: Optional[httpx.Client] = None
+_RERANK_HTTP_ACLIENT: Optional[httpx.AsyncClient] = None
+_RERANK_OPENAI_CLIENT: Optional[Any] = None
+_RERANK_OPENAI_ACLIENT: Optional[Any] = None
+
+
+def _get_rerank_clients(timeout: float) -> Tuple[httpx.Client, httpx.AsyncClient, Any, Any]:
+    global _RERANK_HTTP_CLIENT, _RERANK_HTTP_ACLIENT, _RERANK_OPENAI_CLIENT, _RERANK_OPENAI_ACLIENT
+    
+    # Initialize HTTP clients if needed
+    if _RERANK_HTTP_CLIENT is None:
+        _RERANK_HTTP_CLIENT = httpx.Client(timeout=timeout)
+    if _RERANK_HTTP_ACLIENT is None:
+        _RERANK_HTTP_ACLIENT = httpx.AsyncClient(timeout=timeout)
+        
+    # Initialize OpenAI clients if needed
+    api_key = os.getenv("RERANK_API_KEY") or os.getenv("OPENAI_API_KEY")
+    raw_url = os.getenv("RERANK_API_URL") or os.getenv("RERANK_API_BASE")
+    
+    # Determine base URL logic similar to APIReranker init, but simplified for client creation
+    # We just need the base_url for OpenAI client
+    fallback = os.getenv("OPENAI_API_BASE", "https://api.openai.com/v1")
+    if raw_url:
+        base = raw_url.strip()
+    else:
+        base = fallback
+    if not base:
+        base = fallback
+    base = base.rstrip("/")
+    lowered = base.lower()
+    for suffix in ("/v1/rerank", "/rerank"):
+        if lowered.endswith(suffix):
+            base = base[: -len(suffix)]
+            base = base.rstrip("/")
+            lowered = base.lower()
+    if not base.lower().endswith("/v1"):
+        base = f"{base}/v1"
+    
+    if _RERANK_OPENAI_CLIENT is None:
+        try:
+            _RERANK_OPENAI_CLIENT = OpenAI(
+                api_key=api_key,
+                base_url=base,
+                timeout=timeout,
+            )
+        except Exception as exc:
+            logger.warning("Failed to init cached OpenAI client for rerank: %s", exc)
+            
+    if _RERANK_OPENAI_ACLIENT is None:
+        try:
+            from openai import AsyncOpenAI
+            _RERANK_OPENAI_ACLIENT = AsyncOpenAI(
+                api_key=api_key,
+                base_url=base,
+                timeout=timeout,
+            )
+        except Exception as exc:
+            logger.warning("Failed to init cached AsyncOpenAI client for rerank: %s", exc)
+            
+    return _RERANK_HTTP_CLIENT, _RERANK_HTTP_ACLIENT, _RERANK_OPENAI_CLIENT, _RERANK_OPENAI_ACLIENT
+
+
 class APIReranker(BaseNodePostprocessor):
     """HTTP reranker that calls standard OpenAI chat completion endpoints."""
 
@@ -320,6 +382,9 @@ class APIReranker(BaseNodePostprocessor):
     timeout: float = Field(default=180.0, description="Request timeout in seconds.")
     _api_key: Optional[str] = PrivateAttr()
     _client: Any = PrivateAttr()
+    _aclient: Any = PrivateAttr()
+    _http_client: Any = PrivateAttr()
+    _http_aclient: Any = PrivateAttr()
     _base_url: Optional[str] = PrivateAttr()
     _use_rerank_endpoint: bool = PrivateAttr()
 
@@ -358,34 +423,34 @@ class APIReranker(BaseNodePostprocessor):
         self._api_key = api_key
         self._use_rerank_endpoint = use_rerank_endpoint
         self._base_url = resolved_base or os.getenv("OPENAI_API_BASE")
+        
+        # Use cached clients to avoid per-request connection overhead
+        (
+            self._http_client, 
+            self._http_aclient, 
+            self._client, 
+            self._aclient
+        ) = _get_rerank_clients(self.timeout)
 
         if self._use_rerank_endpoint:
-            self._client = None
-            logger.info(
-                "APIReranker ready rerank-endpoint url=%s top_n=%s model=%s timeout=%ss",
+            # If using raw endpoint, we might not need OpenAI clients, but they are cached anyway
+            # We enforce they are None here if we strictly don't want to use them, 
+            # but the logic in _call_rerank_api checks _use_rerank_endpoint first.
+            pass
+        else:
+             if not self._client:
+                 logger.warning("Rerank disabled: OpenAI client not initialized")
+
+        if logger.isEnabledFor(logging.INFO):
+             type_str = "rerank-endpoint" if self._use_rerank_endpoint else "openai-style"
+             logger.info(
+                "APIReranker initialized type=%s url=%s top_n=%s model=%s timeout=%ss",
+                type_str,
                 self.api_url,
                 top_n,
                 model_name,
                 self.timeout,
             )
-        else:
-            try:
-                self._client = OpenAI(
-                    api_key=self._api_key,
-                    base_url=self._base_url,
-                    timeout=self.timeout,
-                )
-                logger.info(
-                    "APIReranker ready openai-style base=%s endpoint=%s top_n=%s model=%s timeout=%ss",
-                    self._base_url,
-                    self.api_url,
-                    top_n,
-                    model_name,
-                    self.timeout,
-                )
-            except Exception as exc:
-                logger.warning("Rerank disabled: failed to init OpenAI client (%s)", exc)
-                self._client = None
 
     @staticmethod
     def _looks_like_rerank_endpoint(raw_url: Optional[str]) -> bool:
@@ -532,7 +597,7 @@ class APIReranker(BaseNodePostprocessor):
             return nodes[: self.top_n]
         if self._use_rerank_endpoint:
             return await self._acall_rerank_endpoint(nodes, query_bundle)
-        if not self._client:
+        if not self._aclient:
             return nodes[: self.top_n]
         return await self._acall_chat_rerank(nodes, query_bundle)
 
@@ -566,22 +631,7 @@ class APIReranker(BaseNodePostprocessor):
     ) -> List[NodeWithScore]:
         messages = self._build_messages(query_bundle.query_str, nodes)
         try:
-            # Note: Assuming self._client has an async interface or we use a separate AsyncOpenAI client.
-            # If self._client is the sync OpenAI client, we need to handle this.
-            # Given the context, we should probably construct an AsyncOpenAI client if needed,
-            # or check if we can reuse the configuration.
-            # For now, let's assume we can use a temporary AsyncOpenAI client or similar if not available.
-            # However, typically LlamaIndex or OpenAI clients are either sync or async.
-            # We will use a dedicated AsyncOpenAI client for this method if we can't easily reuse.
-            
-            # Re-initializing AsyncOpenAI client to ensure async support
-            from openai import AsyncOpenAI
-            async_client = AsyncOpenAI(
-                api_key=self._api_key,
-                base_url=self._base_url,
-                timeout=self.timeout,
-            )
-            response = await async_client.chat.completions.create(
+            response = await self._aclient.chat.completions.create(
                 model=self.model,
                 messages=messages,
                 temperature=0.0,
@@ -604,10 +654,9 @@ class APIReranker(BaseNodePostprocessor):
         before_sleep=_log_rerank_retry,
     )
     async def _aperform_rerank_request(self, payload: dict, headers: dict) -> dict:
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            response = await client.post(self.api_url, json=payload, headers=headers)
-            response.raise_for_status()
-            return response.json()
+        response = await self._http_aclient.post(self.api_url, json=payload, headers=headers)
+        response.raise_for_status()
+        return response.json()
 
     @retry(
         reraise=True,
@@ -620,10 +669,9 @@ class APIReranker(BaseNodePostprocessor):
         before_sleep=_log_rerank_retry,
     )
     def _perform_rerank_request(self, payload: dict, headers: dict) -> dict:
-        with httpx.Client(timeout=self.timeout) as client:
-            response = client.post(self.api_url, json=payload, headers=headers)
-            response.raise_for_status()
-            return response.json()
+        response = self._http_client.post(self.api_url, json=payload, headers=headers)
+        response.raise_for_status()
+        return response.json()
 
     @staticmethod
     def _build_messages(query: str, nodes: List[NodeWithScore]) -> List[dict]:
@@ -818,7 +866,7 @@ def _build_qdrant_store() -> QdrantVectorStore:
     use_https = os.getenv("QDRANT_HTTPS", "false").lower() == "true"
     client_timeout = float(os.getenv("QDRANT_CLIENT_TIMEOUT", "10"))
 
-    def _create_store(q_client: QdrantClient) -> QdrantVectorStore:
+    def _create_store(q_client: QdrantClient, q_aclient: AsyncQdrantClient) -> QdrantVectorStore:
         if logger.isEnabledFor(logging.INFO):
             logger.info(
                 "Ensuring Qdrant hybrid collection=%s dim=%s",
@@ -828,6 +876,7 @@ def _build_qdrant_store() -> QdrantVectorStore:
         _ensure_hybrid_collection(q_client, collection, embedding_dim)
         return SafeQdrantVectorStore(
             client=q_client,
+            aclient=q_aclient,
             collection_name=collection,
             enable_hybrid=True,
             dense_vector_name="text-dense",
@@ -843,7 +892,10 @@ def _build_qdrant_store() -> QdrantVectorStore:
             remote_client = QdrantClient(
                 url=qdrant_url, api_key=qdrant_api_key, timeout=client_timeout
             )
-            return _create_store(remote_client)
+            remote_aclient = AsyncQdrantClient(
+                url=qdrant_url, api_key=qdrant_api_key, timeout=client_timeout
+            )
+            return _create_store(remote_client, remote_aclient)
         except Exception as exc:
             logger.warning(
                 "Failed to reach managed Qdrant cluster at %s (%s), falling back to host %s:%s",
@@ -872,7 +924,14 @@ def _build_qdrant_store() -> QdrantVectorStore:
         api_key=qdrant_api_key if use_https else None,
         timeout=client_timeout,
     )
-    return _create_store(local_client)
+    local_aclient = AsyncQdrantClient(
+        host=resolved_host,
+        port=port,
+        https=use_https,
+        api_key=qdrant_api_key if use_https else None,
+        timeout=client_timeout,
+    )
+    return _create_store(local_client, local_aclient)
 
 
 vector_store = _build_qdrant_store()
@@ -896,15 +955,30 @@ async def insert_nodes(nodes: List[TextNode]) -> None:
     if not nodes:
         logger.debug("insert_nodes called with empty payload; skipping")
         return
-    logger.info("Inserting %d nodes into Qdrant (will trigger embedding)", len(nodes))
+    
+    # Batch size for insertion to avoid overloading embedding API or Vector DB
+    BATCH_SIZE = int(os.getenv("INSERT_BATCH_SIZE", "50"))
+    total_nodes = len(nodes)
+    logger.info("Inserting %d nodes into Qdrant (will trigger embedding) in batches of %d", total_nodes, BATCH_SIZE)
+    
     start = time.perf_counter()
     index = _get_index()
-    await index.ainsert_nodes(nodes)
+    
+    for i in range(0, total_nodes, BATCH_SIZE):
+        batch = nodes[i : i + BATCH_SIZE]
+        batch_start = time.perf_counter()
+        try:
+            await index.ainsert_nodes(batch)
+            logger.debug("Inserted batch %d-%d (%.2fs)", i, i + len(batch), time.perf_counter() - batch_start)
+        except Exception as exc:
+            logger.error("Failed to insert batch %d-%d: %s", i, i + len(batch), exc)
+            raise exc
+
     elapsed = time.perf_counter() - start
     logger.debug(
         "Qdrant insert complete collection=%s count=%d duration=%.2fs",
         getattr(vector_store, "collection_name", "unknown"),
-        len(nodes),
+        total_nodes,
         elapsed,
     )
 
@@ -1161,15 +1235,16 @@ class TimeDecayPostprocessor(BaseNodePostprocessor):
         return nodes
 
 
-def doc_exists(doc_hash: str) -> bool:
-    """Return True if collection already has a payload with the given doc_hash."""
+async def adoc_exists(doc_hash: str) -> bool:
+    """Return True if collection already has a payload with the given doc_hash (async)."""
     if not doc_hash:
         return False
-    client = getattr(vector_store, "client", None)
+    
     collection = getattr(vector_store, "collection_name", None)
-    if not client or not collection:
+    if not collection:
         return False
-    _ensure_payload_indexes(client, collection)
+        
+    client = _build_async_client()
     try:
         flt = qdrant_models.Filter(
             must=[
@@ -1178,7 +1253,8 @@ def doc_exists(doc_hash: str) -> bool:
                 )
             ]
         )
-        result = client.scroll(
+        # Using scroll with limit=1 to check existence
+        result = await client.scroll(
             collection_name=collection,
             scroll_filter=flt,
             with_payload=False,
@@ -1187,19 +1263,5 @@ def doc_exists(doc_hash: str) -> bool:
         points = result[0] if isinstance(result, (list, tuple)) else result
         return bool(points)
     except Exception as exc:
-        if "Index required" in str(exc):
-            try:
-                _ensure_payload_indexes(client, collection)
-                result = client.scroll(
-                    collection_name=collection,
-                    scroll_filter=flt,
-                    with_payload=False,
-                    limit=1,
-                )
-                points = result[0] if isinstance(result, (list, tuple)) else result
-                return bool(points)
-            except Exception as inner_exc:
-                logger.warning("doc_exists retry failed: %s", inner_exc)
-                return False
-        logger.warning("doc_exists check failed: %s", exc)
+        logger.warning("adoc_exists check failed: %s", exc)
         return False
