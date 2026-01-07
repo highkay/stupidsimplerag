@@ -40,6 +40,20 @@ BATCH_INGEST_CONCURRENCY = max(1, int(os.getenv("BATCH_INGEST_CONCURRENCY", "4")
 MAX_BATCH_FILES = max(1, int(os.getenv("BATCH_MAX_FILES", "20")))
 INSERT_MAX_RETRIES = max(1, int(os.getenv("INGEST_INSERT_MAX_RETRIES", "3")))
 INSERT_RETRY_BACKOFF = float(os.getenv("INGEST_INSERT_RETRY_BACKOFF", "2.0"))
+QUERY_MAX_RETRIES = max(1, int(os.getenv("QUERY_MAX_RETRIES", "3")))
+QUERY_RETRY_BACKOFF = float(os.getenv("QUERY_RETRY_BACKOFF", "2.0"))
+
+
+def _log_query_retry(retry_state: RetryCallState) -> None:
+    exc = retry_state.outcome.exception() if retry_state.outcome else None
+    sleep = retry_state.next_action.sleep if retry_state.next_action else 0
+    logger.warning(
+        "Query attempt %d/%d failed: %s -- retrying in %.1fs",
+        retry_state.attempt_number,
+        QUERY_MAX_RETRIES,
+        exc,
+        sleep,
+    )
 
 
 def _cache_key(body: ChatRequest) -> str:
@@ -509,7 +523,18 @@ async def chat_api(req: ChatRequest) -> ChatResponse:
         if retriever is None:
             raise HTTPException(status_code=500, detail="Retriever unavailable")
         query_bundle = QueryBundle(req.query)
-        source_nodes = await retriever.aretrieve(query_bundle)
+        async for attempt in AsyncRetrying(
+            reraise=True,
+            stop=stop_after_attempt(QUERY_MAX_RETRIES),
+            wait=wait_exponential(
+                multiplier=QUERY_RETRY_BACKOFF,
+                min=QUERY_RETRY_BACKOFF,
+                max=QUERY_RETRY_BACKOFF * 8,
+            ),
+            before_sleep=_log_query_retry,
+        ):
+            with attempt:
+                source_nodes = await retriever.aretrieve(query_bundle)
         postprocessors = getattr(engine, "_node_postprocessors", []) or []
         for processor in postprocessors:
             try:
@@ -518,7 +543,18 @@ async def chat_api(req: ChatRequest) -> ChatResponse:
                 logger.warning("Postprocessor failed, skipping: %s", exc)
         response_answer = _generate_answer_from_nodes(source_nodes)
     else:
-        response = await engine.aquery(req.query)
+        async for attempt in AsyncRetrying(
+            reraise=True,
+            stop=stop_after_attempt(QUERY_MAX_RETRIES),
+            wait=wait_exponential(
+                multiplier=QUERY_RETRY_BACKOFF,
+                min=QUERY_RETRY_BACKOFF,
+                max=QUERY_RETRY_BACKOFF * 8,
+            ),
+            before_sleep=_log_query_retry,
+        ):
+            with attempt:
+                response = await engine.aquery(req.query)
         source_nodes = getattr(response, "source_nodes", []) or []
         response_answer = str(response)
 

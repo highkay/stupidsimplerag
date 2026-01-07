@@ -865,7 +865,7 @@ def _build_qdrant_store() -> QdrantVectorStore:
     qdrant_url = os.getenv("QDRANT_URL")
     qdrant_api_key = os.getenv("QDRANT_API_KEY") or None
     use_https = os.getenv("QDRANT_HTTPS", "false").lower() == "true"
-    client_timeout = float(os.getenv("QDRANT_CLIENT_TIMEOUT", "10"))
+    client_timeout = float(os.getenv("QDRANT_CLIENT_TIMEOUT", "60"))
 
     def _create_store(q_client: QdrantClient, q_aclient: AsyncQdrantClient) -> QdrantVectorStore:
         if logger.isEnabledFor(logging.INFO):
@@ -1073,7 +1073,7 @@ def _build_async_client() -> AsyncQdrantClient:
     qdrant_url = os.getenv("QDRANT_URL")
     qdrant_api_key = os.getenv("QDRANT_API_KEY") or None
     use_https = os.getenv("QDRANT_HTTPS", "false").lower() == "true"
-    client_timeout = float(os.getenv("QDRANT_CLIENT_TIMEOUT", "10"))
+    client_timeout = float(os.getenv("QDRANT_CLIENT_TIMEOUT", "60"))
 
     if qdrant_url:
         qdrant_url = _append_port_if_missing(qdrant_url, port)
