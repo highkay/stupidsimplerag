@@ -25,6 +25,9 @@ class ChatRequest(BaseModel):
     skip_generation: bool = Field(
         False, description="If true, skip LLM generation and only return retrieved sources"
     )
+    scope: Optional[str] = Field(
+        None, description="Optional logical scope/namespace for filtering (e.g. 'reports/2025')"
+    )
 
 
 class SourceItem(BaseModel):
@@ -33,6 +36,7 @@ class SourceItem(BaseModel):
     score: Optional[float] = None
     keywords: Optional[str] = None
     text: str
+    scope: Optional[str] = None
 
 
 class ChatResponse(BaseModel):
@@ -46,6 +50,7 @@ class IngestResponse(BaseModel):
     filename: str
     error: Optional[str] = None
     doc_hash: Optional[str] = None
+    scope: Optional[str] = None
 
 
 class DocumentInfo(BaseModel):
@@ -58,6 +63,7 @@ class TextIngestRequest(BaseModel):
     content: str = Field(..., description="Raw Markdown or text content")
     filename: Optional[str] = Field(None, description="Optional logical filename for tracking")
     force_update: bool = Field(False, description="If true, overwrite existing document with same filename")
+    scope: Optional[str] = Field(None, description="Optional logical scope/namespace")
 
 
 class LLMAnalysis(BaseModel):

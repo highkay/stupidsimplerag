@@ -845,6 +845,14 @@ def _ensure_payload_indexes(client: QdrantClient, collection_name: str) -> None:
         )
     except Exception:
         pass
+    try:
+        client.create_payload_index(
+            collection_name=collection_name,
+            field_name="scope",
+            field_schema=qdrant_models.PayloadSchemaType.KEYWORD,
+        )
+    except Exception:
+        pass
 
 
 def _append_port_if_missing(raw_url: str, default_port: int) -> str:
@@ -1002,6 +1010,8 @@ def get_query_engine(
     keywords_any: Optional[List[str]] = None,
     keywords_all: Optional[List[str]] = None,
     time_decay_rate: Optional[float] = None,
+    scope: Optional[str] = None,
+    filenames_in: Optional[List[str]] = None,
 ):
     filters: Optional[MetadataFilters] = None
     filter_items: List[MetadataFilter] = []
@@ -1031,6 +1041,26 @@ def get_query_engine(
                 operator=FilterOperator.TEXT_MATCH_INSENSITIVE,
             )
         )
+    if scope:
+        # Match scope exactly or as a path prefix?
+        # User suggestion: "simulate file system path... use prefix match"
+        # Qdrant KEYWORD index supports exact match. TEXT match supports token match.
+        # For path hierarchy like "reports/2025", we might want "reports" to match "reports/2025".
+        # But Qdrant TEXT match is token based.
+        # Let's use TEXT_MATCH_INSENSITIVE for flexibility, or EQ if strict.
+        # Given "optional logical scope", let's use EQ for simplicity first, or prefix if possible?
+        # LlamaIndex FilterOperator doesn't have "PREFIX".
+        # Let's stick to EQ for strict scope or TEXT_MATCH for partial.
+        # OpenViking uses "viking://scope/path".
+        # Let's use EQ for now as it's safer for strict isolation.
+        filter_items.append(
+            MetadataFilter(key="scope", value=scope, operator=FilterOperator.EQ)
+        )
+    if filenames_in:
+        filter_items.append(
+            MetadataFilter(key="filename", value=filenames_in, operator=FilterOperator.IN)
+        )
+        
     if filter_items:
         filters = MetadataFilters(filters=filter_items)
 
@@ -1061,6 +1091,80 @@ def get_query_engine(
         node_postprocessors=postprocessors,
         response_mode="simple_summarize",
     )
+
+
+async def perform_hierarchical_search(
+    query: str,
+    scope: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    keywords_any: Optional[List[str]] = None,
+    keywords_all: Optional[List[str]] = None,
+    top_docs: int = 3,
+):
+    """
+    Two-stage retrieval (LOD):
+    1. Retrieve potential chunks (L1)
+    2. Aggregate by filename to find Top N relevant documents
+    3. Re-retrieve/Re-rank focused strictly on those documents (L2)
+    """
+    logger.info("Starting hierarchical search query=%r scope=%s", query, scope)
+    
+    # L1: Fast retrieval (skip rerank for speed, or keep it for better L1 precision? 
+    # Let's keep rerank to ensure the "Summary" (if matched) actually bubbles up.
+    # But to save cost, we might skip it or use a cheaper one. 
+    # For now, reuse standard logic but maybe just retrieval.)
+    
+    # We use get_query_engine to get a retriever-like object.
+    # We'll use the query engine's retrieve method.
+    engine_l1 = get_query_engine(
+        start_date=start_date,
+        end_date=end_date,
+        scope=scope,
+        skip_rerank=False, # Use rerank to get quality candidates for document selection
+        keywords_any=keywords_any,
+        keywords_all=keywords_all,
+    )
+    
+    nodes_l1 = await engine_l1.aretrieve(QueryBundle(query))
+    if not nodes_l1:
+        logger.info("L1 search returned 0 nodes")
+        return None # Let caller handle empty
+
+    # Aggregate by filename
+    doc_scores = {}
+    for node in nodes_l1:
+        fname = node.metadata.get("filename")
+        if not fname:
+            continue
+        # Strategy: Max score per doc
+        score = node.score or 0.0
+        if fname not in doc_scores or score > doc_scores[fname]:
+            doc_scores[fname] = score
+            
+    sorted_docs = sorted(doc_scores.items(), key=lambda x: x[1], reverse=True)
+    top_files = [x[0] for x in sorted_docs[:top_docs]]
+    logger.info("L1 identified top %d docs: %s", len(top_files), top_files)
+    
+    if not top_files:
+        return None
+
+    # L2: Focused Search
+    # We restrict search to these files. 
+    # We can perform generation here.
+    engine_l2 = get_query_engine(
+        filename=None, # We use filenames_in
+        filenames_in=top_files,
+        skip_rerank=False, # Rerank again within the focused set? Yes, to order chunks for context.
+        # We assume L1 rerank was coarse or global. L2 is focused.
+        # Actually, if we already reranked in L1, maybe we just use those nodes?
+        # But L1 might have missed some chunks from the "good doc" because of global Top K.
+        # L2 brings ALL relevant chunks from the "good doc" into scope (if we used a higher top_k for L2?)
+        # Let's trust standard Top K but constrained to these docs.
+    )
+    
+    response = await engine_l2.aquery(query)
+    return response
 
 
 def _build_async_client() -> AsyncQdrantClient:

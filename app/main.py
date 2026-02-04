@@ -24,6 +24,7 @@ from app.core import (
     delete_nodes_by_filename,
     list_all_documents,
     check_filename_exists,
+    perform_hierarchical_search,
 )
 from app.ingest import compute_doc_hash, process_file
 from app.models import (
@@ -76,9 +77,15 @@ def _cache_key(body: ChatRequest) -> str:
         ",".join(body.keywords_all or []),
         str(body.skip_rerank),
         str(body.skip_generation),
+        body.scope or "",
     ]
     raw = "|".join(parts)
     return hashlib.md5(raw.encode()).hexdigest()
+
+# ... (rest of imports/helpers unchanged)
+
+# Need to target the Chat API block now
+# I will skip to the chat_api replace
 
 
 def _parse_epoch_date(raw: str) -> Optional[str]:
@@ -230,7 +237,7 @@ def _generate_answer_from_nodes(nodes: List, limit: int = 3) -> str:
 
 
 async def _process_and_insert_content(
-    filename: str, content: str, ingest_date: Optional[str], force_update: bool = False
+    filename: str, content: str, ingest_date: Optional[str], force_update: bool = False, scope: Optional[str] = None
 ) -> tuple[List[TextNode], bool, str]:
     """
     Shared helper to run expensive processing & DB insert without blocking the event loop.
@@ -238,12 +245,13 @@ async def _process_and_insert_content(
     content_len = len(content)
     doc_hash = compute_doc_hash(content)
     logger.debug(
-        "Begin ingest pipeline file=%s ingest_date=%s content_len=%d doc_hash=%s force_update=%s",
+        "Begin ingest pipeline file=%s ingest_date=%s content_len=%d doc_hash=%s force_update=%s scope=%s",
         filename,
         ingest_date,
         content_len,
         doc_hash,
         force_update,
+        scope,
     )
     
     # Check if content exists (hash-based deduplication)
@@ -264,7 +272,7 @@ async def _process_and_insert_content(
 
     start = time.perf_counter()
     nodes = await process_file(
-        filename, content, ingest_date=ingest_date, doc_hash=doc_hash
+        filename, content, ingest_date=ingest_date, doc_hash=doc_hash, scope=scope
     )
     processing_elapsed = time.perf_counter() - start
     logger.debug(
@@ -320,8 +328,8 @@ async def _insert_nodes_with_retry(nodes: List[TextNode]) -> None:
             )
 
 
-async def _ingest_single_upload(upload: UploadFile, force_update: bool = False) -> IngestResponse:
-    logger.info("Batch ingest processing file=%s force_update=%s", upload.filename, force_update)
+async def _ingest_single_upload(upload: UploadFile, force_update: bool = False, scope: Optional[str] = None) -> IngestResponse:
+    logger.info("Batch ingest processing file=%s force_update=%s scope=%s", upload.filename, force_update, scope)
     try:
         raw_bytes = await upload.read()
         logger.debug(
@@ -332,7 +340,7 @@ async def _ingest_single_upload(upload: UploadFile, force_update: bool = False) 
         content = _decode_upload_bytes(raw_bytes, upload.filename)
         ingest_date = _extract_upload_date(upload)
         nodes, skipped, doc_hash = await _process_and_insert_content(
-            upload.filename, content, ingest_date, force_update=force_update
+            upload.filename, content, ingest_date, force_update=force_update, scope=scope
         )
         status = "skipped" if skipped else "ok"
         result = IngestResponse(
@@ -340,6 +348,7 @@ async def _ingest_single_upload(upload: UploadFile, force_update: bool = False) 
             chunks=len(nodes),
             filename=upload.filename,
             doc_hash=doc_hash,
+            scope=scope,
         )
         logger.info(
             "Batch ingest processed file=%s status=%s chunks=%d",
@@ -358,19 +367,20 @@ async def _ingest_single_upload(upload: UploadFile, force_update: bool = False) 
 @app.post("/ingest", response_model=IngestResponse)
 async def ingest_api(
     file: UploadFile = File(...), 
-    force_update: bool = Form(False)
+    force_update: bool = Form(False),
+    scope: Optional[str] = Form(None)
 ) -> IngestResponse:
     if not (file.filename.endswith(".md") or file.filename.endswith(".txt")):
         raise HTTPException(status_code=400, detail="Only .md or .txt supported")
 
-    logger.info("Ingest single file=%s force_update=%s", file.filename, force_update)
+    logger.info("Ingest single file=%s force_update=%s scope=%s", file.filename, force_update, scope)
     raw_bytes = await file.read()
     byte_len = len(raw_bytes or b"")
     logger.debug("Received upload file=%s size_bytes=%d", file.filename, byte_len)
     content = _decode_upload_bytes(raw_bytes, file.filename)
     ingest_date = _extract_upload_date(file)
     nodes, skipped, doc_hash = await _process_and_insert_content(
-        file.filename, content, ingest_date, force_update=force_update
+        file.filename, content, ingest_date, force_update=force_update, scope=scope
     )
     status = "skipped" if skipped else "ok"
     logger.info(
@@ -380,14 +390,15 @@ async def ingest_api(
         len(nodes),
     )
     return IngestResponse(
-        status=status, chunks=len(nodes), filename=file.filename, doc_hash=doc_hash
+        status=status, chunks=len(nodes), filename=file.filename, doc_hash=doc_hash, scope=scope
     )
 
 
 @app.post("/ingest/batch", response_model=List[IngestResponse])
 async def ingest_batch(
     files: List[UploadFile] = File(...),
-    force_update: bool = Form(False)
+    force_update: bool = Form(False),
+    scope: Optional[str] = Form(None)
 ) -> List[IngestResponse]:
     if not files:
         raise HTTPException(status_code=400, detail="At least one file is required")
@@ -405,10 +416,11 @@ async def ingest_batch(
             )
 
     logger.info(
-        "Batch ingest start files=%d concurrency=%d force_update=%s",
+        "Batch ingest start files=%d concurrency=%d force_update=%s scope=%s",
         len(files),
         BATCH_INGEST_CONCURRENCY,
-        force_update
+        force_update,
+        scope
     )
     concurrency = BATCH_INGEST_CONCURRENCY
     responses: List[Optional[IngestResponse]] = [None] * len(files)
@@ -416,7 +428,7 @@ async def ingest_batch(
 
     async def _runner(idx: int, upload: UploadFile) -> tuple[int, IngestResponse]:
         try:
-            result = await _ingest_single_upload(upload, force_update=force_update)
+            result = await _ingest_single_upload(upload, force_update=force_update, scope=scope)
             return idx, result
         except Exception as exc:  # pragma: no cover - defensive logging
             detail = getattr(exc, "detail", str(exc))
@@ -497,7 +509,7 @@ async def ingest_text_api(request: Request, body: TextIngestRequest) -> IngestRe
         ingest_date = now.strftime("%Y-%m-%d")
     
     filename = body.filename or f"inline_{datetime.datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.md"
-    logger.info("Text ingest filename=%s date=%s force_update=%s", filename, ingest_date, body.force_update)
+    logger.info("Text ingest filename=%s date=%s force_update=%s scope=%s", filename, ingest_date, body.force_update, body.scope)
     logger.debug(
         "Text ingest filename=%s raw_len=%d stripped_len=%d",
         filename,
@@ -505,7 +517,7 @@ async def ingest_text_api(request: Request, body: TextIngestRequest) -> IngestRe
         len(content),
     )
     nodes, skipped, doc_hash = await _process_and_insert_content(
-        filename, content, ingest_date, force_update=body.force_update
+        filename, content, ingest_date, force_update=body.force_update, scope=body.scope
     )
     status = "skipped" if skipped else "ok"
     logger.info(
@@ -515,14 +527,14 @@ async def ingest_text_api(request: Request, body: TextIngestRequest) -> IngestRe
         len(nodes),
     )
     return IngestResponse(
-        status=status, chunks=len(nodes), filename=filename, doc_hash=doc_hash
+        status=status, chunks=len(nodes), filename=filename, doc_hash=doc_hash, scope=body.scope
     )
 
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat_api(req: ChatRequest) -> ChatResponse:
     logger.info(
-        "Chat request query=%r start=%s end=%s filename=%s contains=%s any=%s all=%s",
+        "Chat request query=%r start=%s end=%s filename=%s contains=%s any=%s all=%s scope=%s",
         req.query,
         req.start_date,
         req.end_date,
@@ -530,6 +542,7 @@ async def chat_api(req: ChatRequest) -> ChatResponse:
         req.filename_contains,
         req.keywords_any,
         req.keywords_all,
+        req.scope,
     )
     key = _cache_key(req)
     if key in CACHE:
@@ -545,6 +558,7 @@ async def chat_api(req: ChatRequest) -> ChatResponse:
         skip_rerank=req.skip_rerank,
         keywords_any=req.keywords_any,
         keywords_all=req.keywords_all,
+        scope=req.scope,
     )
 
     if req.skip_generation:
@@ -603,6 +617,47 @@ async def chat_api(req: ChatRequest) -> ChatResponse:
         top_filenames,
         len(result_payload["answer"]),
     )
+    return ChatResponse(**result_payload)
+
+
+@app.post("/chat/lod", response_model=ChatResponse)
+async def chat_lod_api(req: ChatRequest) -> ChatResponse:
+    """
+    Two-stage hierarchical retrieval endpoint.
+    L1: Retrieve broad candidates & identify top documents.
+    L2: Focus generation on those top documents.
+    """
+    logger.info("LOD Chat request query=%r scope=%s", req.query, req.scope)
+    
+    # We don't cache LOD requests yet, or we can reuse CACHE but with a different key prefix?
+    # For now, no cache for simplicity of the new feature.
+    
+    try:
+        response = await perform_hierarchical_search(
+            query=req.query,
+            scope=req.scope,
+            start_date=req.start_date,
+            end_date=req.end_date,
+            keywords_any=req.keywords_any,
+            keywords_all=req.keywords_all,
+        )
+    except Exception as exc:
+        logger.error("LOD search failed: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+        
+    if not response:
+        return ChatResponse(answer="No relevant documents found in L1 search.", sources=[])
+        
+    source_nodes = getattr(response, "source_nodes", []) or []
+    response_answer = str(response)
+
+    final_k = int(os.getenv("FINAL_TOP_K", "10"))
+    result_nodes = source_nodes[:final_k]
+
+    result_payload: Dict = {
+        "answer": response_answer,
+        "sources": [_node_to_source(node).dict() for node in result_nodes],
+    }
     return ChatResponse(**result_payload)
 
 
@@ -741,6 +796,7 @@ async def chat_via_ui(
     keywords_all: Optional[str] = Form(None),
     skip_rerank: Optional[str] = Form(None),
     skip_generation: Optional[str] = Form(None),
+    scope: Optional[str] = Form(None),
 ) -> HTMLResponse:
     req_body = ChatRequest(
         query=query,
@@ -752,6 +808,7 @@ async def chat_via_ui(
         keywords_all=_parse_keywords(keywords_all),
         skip_rerank=_parse_bool(skip_rerank),
         skip_generation=_parse_bool(skip_generation),
+        scope=scope or None,
     )
     is_htmx = _is_htmx(request)
     template_name = "partials/chat_result.html" if is_htmx else "chat.html"

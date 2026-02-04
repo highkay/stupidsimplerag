@@ -28,6 +28,7 @@ docker run --env-file .env -p 8000:8000 highkay/stupidsimplerag:latest
 | `/documents` | `GET` | `-` | 列出所有已入库的文档及其切片数。 |
 | `/documents/{filename}` | `DELETE` | `-` | 按文件名物理删除文档及其所有向量切片。 |
 | `/chat` | `POST` | `application/json` | 检索 + 生成，支持多种过滤器。 |
+| `/chat/lod` | `POST` | `application/json` | **LOD 两阶段检索**：先定位 Top 文档，再聚焦生成，适合长尾知识召回。 |
 
 每个入库请求都会返回 `IngestResponse`（或其数组），包含入库状态与 `doc_hash`。
 
@@ -36,6 +37,7 @@ docker run --env-file .env -p 8000:8000 highkay/stupidsimplerag:latest
 - **字段**：
   - `file`（必填）：`.md`/`.txt` 文件。
   - `force_update`（可选）：布尔值，默认为 `false`。若为 `true`，将先删除同名旧文档的所有切片再重新入库。
+  - `scope`（可选）：逻辑命名空间（如 `reports/2025`），用于隔离或层级过滤。
 - **可选 Header**：`X-File-Mtime`，业务日期。
 - **响应 (`IngestResponse`)**
 
@@ -45,6 +47,7 @@ docker run --env-file .env -p 8000:8000 highkay/stupidsimplerag:latest
   "chunks": 12,
   "filename": "20250228_NVIDIA_Report.md",
   "doc_hash": "b9c8e4...",
+  "scope": "reports/2025",
   "error": null
 }
 ```
@@ -54,6 +57,7 @@ docker run --env-file .env -p 8000:8000 highkay/stupidsimplerag:latest
 - **字段**：
   - `files`（重复添加）：多个 `.md`/`.txt` 文件。
   - `force_update`（可选）：布尔值，默认为 `false`。开启后批量更新同名文档。
+  - `scope`（可选）：批量指定逻辑命名空间。
 - **并发**：受 `BATCH_INGEST_CONCURRENCY` 控制。
 
 ### `POST /ingest/text`（在线文本入库）
@@ -64,7 +68,8 @@ docker run --env-file .env -p 8000:8000 highkay/stupidsimplerag:latest
 {
   "content": "# 文档正文…",
   "filename": "optional_name.md",
-  "force_update": false           // 可选，是否覆盖更新
+  "force_update": false,
+  "scope": "optional/scope"
 }
 ```
 
@@ -97,6 +102,7 @@ docker run --env-file .env -p 8000:8000 highkay/stupidsimplerag:latest
 | `filename_contains` | `string` | 否 | 对文件名做大小写不敏感的包含匹配。 |
 | `keywords_any` | `string[]` | 否 | 仅返回命中任意关键词的切片。 |
 | `keywords_all` | `string[]` | 否 | 仅返回同时覆盖所有关键词的切片。 |
+| `scope` | `string` | 否 | 精确匹配逻辑命名空间。 |
 | `skip_rerank` | `bool` | 否 | 跳过 Rerank，直接返回相似度排序。 |
 | `skip_generation` | `bool` | 否 | 跳过回答生成，仅返回切片。 |
 

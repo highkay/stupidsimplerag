@@ -133,35 +133,39 @@ async def process_file(
     content: str,
     ingest_date: str | None = None,
     doc_hash: str | None = None,
+    scope: str | None = None,
 ) -> List[TextNode]:
     content_length = len(content)
     extracted_date = extract_date_from_filename(filename)
     if ingest_date:
         logger.debug(
-            "process_file override ingest_date=%s file=%s content_len=%d",
+            "process_file override ingest_date=%s file=%s content_len=%d scope=%s",
             ingest_date,
             filename,
             content_length,
+            scope,
         )
     elif extracted_date:
         logger.debug(
-            "process_file extracted_date=%s file=%s content_len=%d",
+            "process_file extracted_date=%s file=%s content_len=%d scope=%s",
             extracted_date,
             filename,
             content_length,
+            scope,
         )
     else:
         logger.debug(
-            "process_file fallback to default date for file=%s content_len=%d",
+            "process_file fallback to default date for file=%s content_len=%d scope=%s",
             filename,
             content_length,
+            scope,
         )
     meta_date = ingest_date or extracted_date or "1970-01-01"
     try:
         meta_date_numeric = int(meta_date.replace("-", ""))
     except ValueError:
         meta_date_numeric = 19700101
-    logger.info("Processing file=%s extracted_date=%s", filename, meta_date)
+    logger.info("Processing file=%s extracted_date=%s scope=%s", filename, meta_date, scope)
     analysis_start = time.perf_counter()
     analysis = await analyze_document(content)
     analysis_elapsed = time.perf_counter() - analysis_start
@@ -217,17 +221,21 @@ async def process_file(
         if chunk_len > max_chunk_len:
             max_chunk_len = chunk_len
         full_text = f"{header_text}{chunk_text}"
+        node_metadata = {
+            "filename": filename,
+            "date": meta_date,
+            "date_numeric": meta_date_numeric,
+            "doc_hash": doc_hash,
+            "keywords": keywords_str,
+            "keyword_list": keywords,
+            "original_text": chunk_text,
+        }
+        if scope:
+            node_metadata["scope"] = scope
+
         node = TextNode(
             text=full_text,
-            metadata={
-                "filename": filename,
-                "date": meta_date,
-                "date_numeric": meta_date_numeric,
-                "doc_hash": doc_hash,
-                "keywords": keywords_str,
-                "keyword_list": keywords,
-                "original_text": chunk_text,
-            },
+            metadata=node_metadata,
         )
         hash_base = doc_hash or filename
         node.id_ = hashlib.md5(f"{hash_base}_{idx}".encode()).hexdigest()
