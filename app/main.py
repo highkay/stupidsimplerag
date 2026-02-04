@@ -16,7 +16,15 @@ from tenacity import AsyncRetrying, RetryCallState, stop_after_attempt, wait_exp
 
 from llama_index.core import QueryBundle
 from llama_index.core.schema import TextNode
-from app.core import adoc_exists, get_collection_metrics, get_query_engine, insert_nodes
+from app.core import (
+    adoc_exists,
+    get_collection_metrics,
+    get_query_engine,
+    insert_nodes,
+    delete_nodes_by_filename,
+    list_all_documents,
+    check_filename_exists,
+)
 from app.ingest import compute_doc_hash, process_file
 from app.models import (
     ChatRequest,
@@ -24,6 +32,7 @@ from app.models import (
     IngestResponse,
     SourceItem,
     TextIngestRequest,
+    DocumentInfo,
 )
 from app.utils import get_node_metadata
 
@@ -221,7 +230,7 @@ def _generate_answer_from_nodes(nodes: List, limit: int = 3) -> str:
 
 
 async def _process_and_insert_content(
-    filename: str, content: str, ingest_date: Optional[str]
+    filename: str, content: str, ingest_date: Optional[str], force_update: bool = False
 ) -> tuple[List[TextNode], bool, str]:
     """
     Shared helper to run expensive processing & DB insert without blocking the event loop.
@@ -229,17 +238,30 @@ async def _process_and_insert_content(
     content_len = len(content)
     doc_hash = compute_doc_hash(content)
     logger.debug(
-        "Begin ingest pipeline file=%s ingest_date=%s content_len=%d doc_hash=%s",
+        "Begin ingest pipeline file=%s ingest_date=%s content_len=%d doc_hash=%s force_update=%s",
         filename,
         ingest_date,
         content_len,
         doc_hash,
+        force_update,
     )
-    if await adoc_exists(doc_hash):
+    
+    # Check if content exists (hash-based deduplication)
+    # If we are NOT forcing an update, we can skip if hash exists.
+    # If we ARE forcing an update, we should delete old nodes for this filename even if hash is same.
+    if not force_update and await adoc_exists(doc_hash):
         logger.info(
             "Skipping ingest for file=%s doc_hash=%s (already exists)", filename, doc_hash
         )
         return [], True, doc_hash
+
+    if force_update:
+        logger.info("Force update enabled: deleting existing nodes for filename=%s", filename)
+        await delete_nodes_by_filename(filename)
+        # We also need to clear CACHE because the knowledge base has changed
+        CACHE.clear()
+        logger.debug("Cleared global query cache due to document update")
+
     start = time.perf_counter()
     nodes = await process_file(
         filename, content, ingest_date=ingest_date, doc_hash=doc_hash
@@ -298,8 +320,8 @@ async def _insert_nodes_with_retry(nodes: List[TextNode]) -> None:
             )
 
 
-async def _ingest_single_upload(upload: UploadFile) -> IngestResponse:
-    logger.info("Batch ingest processing file=%s", upload.filename)
+async def _ingest_single_upload(upload: UploadFile, force_update: bool = False) -> IngestResponse:
+    logger.info("Batch ingest processing file=%s force_update=%s", upload.filename, force_update)
     try:
         raw_bytes = await upload.read()
         logger.debug(
@@ -310,7 +332,7 @@ async def _ingest_single_upload(upload: UploadFile) -> IngestResponse:
         content = _decode_upload_bytes(raw_bytes, upload.filename)
         ingest_date = _extract_upload_date(upload)
         nodes, skipped, doc_hash = await _process_and_insert_content(
-            upload.filename, content, ingest_date
+            upload.filename, content, ingest_date, force_update=force_update
         )
         status = "skipped" if skipped else "ok"
         result = IngestResponse(
@@ -334,18 +356,21 @@ async def _ingest_single_upload(upload: UploadFile) -> IngestResponse:
 
 
 @app.post("/ingest", response_model=IngestResponse)
-async def ingest_api(file: UploadFile = File(...)) -> IngestResponse:
+async def ingest_api(
+    file: UploadFile = File(...), 
+    force_update: bool = Form(False)
+) -> IngestResponse:
     if not (file.filename.endswith(".md") or file.filename.endswith(".txt")):
         raise HTTPException(status_code=400, detail="Only .md or .txt supported")
 
-    logger.info("Ingest single file=%s", file.filename)
+    logger.info("Ingest single file=%s force_update=%s", file.filename, force_update)
     raw_bytes = await file.read()
     byte_len = len(raw_bytes or b"")
     logger.debug("Received upload file=%s size_bytes=%d", file.filename, byte_len)
     content = _decode_upload_bytes(raw_bytes, file.filename)
     ingest_date = _extract_upload_date(file)
     nodes, skipped, doc_hash = await _process_and_insert_content(
-        file.filename, content, ingest_date
+        file.filename, content, ingest_date, force_update=force_update
     )
     status = "skipped" if skipped else "ok"
     logger.info(
@@ -360,7 +385,10 @@ async def ingest_api(file: UploadFile = File(...)) -> IngestResponse:
 
 
 @app.post("/ingest/batch", response_model=List[IngestResponse])
-async def ingest_batch(files: List[UploadFile] = File(...)) -> List[IngestResponse]:
+async def ingest_batch(
+    files: List[UploadFile] = File(...),
+    force_update: bool = Form(False)
+) -> List[IngestResponse]:
     if not files:
         raise HTTPException(status_code=400, detail="At least one file is required")
     if len(files) > MAX_BATCH_FILES:
@@ -377,9 +405,10 @@ async def ingest_batch(files: List[UploadFile] = File(...)) -> List[IngestRespon
             )
 
     logger.info(
-        "Batch ingest start files=%d concurrency=%d",
+        "Batch ingest start files=%d concurrency=%d force_update=%s",
         len(files),
         BATCH_INGEST_CONCURRENCY,
+        force_update
     )
     concurrency = BATCH_INGEST_CONCURRENCY
     responses: List[Optional[IngestResponse]] = [None] * len(files)
@@ -387,7 +416,7 @@ async def ingest_batch(files: List[UploadFile] = File(...)) -> List[IngestRespon
 
     async def _runner(idx: int, upload: UploadFile) -> tuple[int, IngestResponse]:
         try:
-            result = await _ingest_single_upload(upload)
+            result = await _ingest_single_upload(upload, force_update=force_update)
             return idx, result
         except Exception as exc:  # pragma: no cover - defensive logging
             detail = getattr(exc, "detail", str(exc))
@@ -468,7 +497,7 @@ async def ingest_text_api(request: Request, body: TextIngestRequest) -> IngestRe
         ingest_date = now.strftime("%Y-%m-%d")
     
     filename = body.filename or f"inline_{datetime.datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.md"
-    logger.info("Text ingest filename=%s date=%s", filename, ingest_date)
+    logger.info("Text ingest filename=%s date=%s force_update=%s", filename, ingest_date, body.force_update)
     logger.debug(
         "Text ingest filename=%s raw_len=%d stripped_len=%d",
         filename,
@@ -476,7 +505,7 @@ async def ingest_text_api(request: Request, body: TextIngestRequest) -> IngestRe
         len(content),
     )
     nodes, skipped, doc_hash = await _process_and_insert_content(
-        filename, content, ingest_date
+        filename, content, ingest_date, force_update=body.force_update
     )
     status = "skipped" if skipped else "ok"
     logger.info(
@@ -577,6 +606,47 @@ async def chat_api(req: ChatRequest) -> ChatResponse:
     return ChatResponse(**result_payload)
 
 
+@app.get("/documents", response_model=List[DocumentInfo])
+async def list_documents_api() -> List[DocumentInfo]:
+    """API to list all documents."""
+    docs = await list_all_documents()
+    return [DocumentInfo(**d) for d in docs]
+
+
+@app.delete("/documents/{filename}")
+async def delete_document_api(filename: str):
+    """API to delete a document by filename."""
+    success = await delete_nodes_by_filename(filename)
+    if not success:
+        raise HTTPException(status_code=500, detail=f"Failed to delete {filename}")
+    # Clear cache since the data has changed
+    CACHE.clear()
+    return {"status": "ok", "filename": filename}
+
+
+@app.get("/ui/documents", response_class=HTMLResponse)
+async def list_documents_ui(request: Request) -> HTMLResponse:
+    """UI fragment for listing documents (HTMX)."""
+    docs = await list_all_documents()
+    return templates.TemplateResponse(
+        "partials/document_list.html", 
+        {"request": request, "documents": docs}
+    )
+
+
+@app.delete("/ui/documents/{filename}", response_class=HTMLResponse)
+async def delete_document_ui(request: Request, filename: str) -> HTMLResponse:
+    """HTMX endpoint to delete a document and return the updated list."""
+    await delete_nodes_by_filename(filename)
+    CACHE.clear()
+    # After deletion, return the updated list fragment
+    docs = await list_all_documents()
+    return templates.TemplateResponse(
+        "partials/document_list.html", 
+        {"request": request, "documents": docs}
+    )
+
+
 @app.get("/", response_class=HTMLResponse)
 async def dashboard_page(request: Request) -> HTMLResponse:
     metrics = await get_collection_metrics()
@@ -620,12 +690,17 @@ async def chat_page(request: Request) -> HTMLResponse:
 
 
 @app.post("/ui/ingest", response_class=HTMLResponse)
-async def upload_via_ui(request: Request, file: UploadFile = File(...)) -> HTMLResponse:
+async def upload_via_ui(
+    request: Request, 
+    file: UploadFile = File(...),
+    force_update: Optional[str] = Form(None)
+) -> HTMLResponse:
     is_htmx = _is_htmx(request)
     template_name = "partials/upload_result.html" if is_htmx else "upload_single.html"
     context = {"request": request}
     try:
-        result = await ingest_api(file)
+        force_val = _parse_bool(force_update)
+        result = await ingest_api(file, force_update=force_val)
         context["result"] = result.dict()
     except HTTPException as exc:
         context["error"] = exc.detail
@@ -636,13 +711,16 @@ async def upload_via_ui(request: Request, file: UploadFile = File(...)) -> HTMLR
 
 @app.post("/ui/ingest/batch", response_class=HTMLResponse)
 async def upload_batch_via_ui(
-    request: Request, files: List[UploadFile] = File(...)
+    request: Request, 
+    files: List[UploadFile] = File(...),
+    force_update: Optional[str] = Form(None)
 ) -> HTMLResponse:
     is_htmx = _is_htmx(request)
     template_name = "partials/batch_result.html" if is_htmx else "upload_batch.html"
     context = {"request": request}
     try:
-        results = await ingest_batch(files)
+        force_val = _parse_bool(force_update)
+        results = await ingest_batch(files, force_update=force_val)
         context["results"] = [item.dict() for item in results]
     except HTTPException as exc:
         context["error"] = exc.detail

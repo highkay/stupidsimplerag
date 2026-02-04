@@ -48,9 +48,16 @@ class IngestResponse(BaseModel):
     doc_hash: Optional[str] = None
 
 
+class DocumentInfo(BaseModel):
+    filename: str
+    date: Optional[str] = None
+    chunks: int
+
+
 class TextIngestRequest(BaseModel):
     content: str = Field(..., description="Raw Markdown or text content")
     filename: Optional[str] = Field(None, description="Optional logical filename for tracking")
+    force_update: bool = Field(False, description="If true, overwrite existing document with same filename")
 
 
 class LLMAnalysis(BaseModel):

@@ -34,6 +34,14 @@
                             </div>
                             <input type="file" id="files" name="files" multiple accept=".md" class="file-input file-input-bordered w-full" required>
                         </label>
+
+                        <div class="form-control w-fit">
+                            <label class="label cursor-pointer gap-4">
+                                <span class="label-text font-medium text-warning">覆盖更新已存在的文档</span>
+                                <input type="checkbox" name="force_update" value="true" class="checkbox checkbox-warning checkbox-sm">
+                            </label>
+                            <span class="text-[10px] text-base-content/50 px-1">开启后，同名文档将自动先删除再重新入库。</span>
+                        </div>
                     </fieldset>
                     <div class="flex items-center justify-between gap-3">
                         <p class="text-xs text-base-content/60">并发度由环境变量 BATCH_INGEST_CONCURRENCY 控制。</p>

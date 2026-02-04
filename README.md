@@ -25,14 +25,18 @@ docker run --env-file .env -p 8000:8000 highkay/stupidsimplerag:latest
 | `/ingest` | `POST` | `multipart/form-data` | 单文件入库，自动切分并生成富语义头部。 |
 | `/ingest/batch` | `POST` | `multipart/form-data` | 批量入库，支持混合成功与部分失败的反馈。 |
 | `/ingest/text` | `POST` | `application/json` | 直接推送 Markdown/TXT 字符串。 |
+| `/documents` | `GET` | `-` | 列出所有已入库的文档及其切片数。 |
+| `/documents/{filename}` | `DELETE` | `-` | 按文件名物理删除文档及其所有向量切片。 |
 | `/chat` | `POST` | `application/json` | 检索 + 生成，支持多种过滤器。 |
 
-每个入库请求都会返回 `IngestResponse`（或其数组），包含入库状态与 `doc_hash`，方便客户端判断幂等。检索响应遵循 `ChatResponse`/`SourceItem`，附带必要的元数据供前端展示。
+每个入库请求都会返回 `IngestResponse`（或其数组），包含入库状态与 `doc_hash`。
 
 ### `POST /ingest`（单文件入库）
 
-- **字段**：`file`（必填），值为 `.md`/`.txt` 文件；编码需为 UTF-8。
-- **可选 Header**：`X-File-Mtime`，可使用 Unix 时间戳（秒/ms）或 ISO8601 字符串；若提供则作为该文档的业务日期写入元数据。
+- **字段**：
+  - `file`（必填）：`.md`/`.txt` 文件。
+  - `force_update`（可选）：布尔值，默认为 `false`。若为 `true`，将先删除同名旧文档的所有切片再重新入库。
+- **可选 Header**：`X-File-Mtime`，业务日期。
 - **响应 (`IngestResponse`)**
 
 ```json
@@ -45,14 +49,12 @@ docker run --env-file .env -p 8000:8000 highkay/stupidsimplerag:latest
 }
 ```
 
-`status=skipped` 代表同一份文档（按 `doc_hash`）已存在，本次不会重复入库。
-
 ### `POST /ingest/batch`（批量入库）
 
-- **字段**：重复添加 `files=@*.md` 或 `files=@*.txt`。
-- **可选 Header**：每个文件都可以附带 `X-File-Mtime`。
-- **响应**：`[IngestResponse, ...]`。出错的文件会返回 `status="error"` 与 `error` 字段，成功的文件与单文件版本一致。
-- **并发**：受 `BATCH_INGEST_CONCURRENCY`（默认 4）控制，日志会记录每个文件的插入状态。
+- **字段**：
+  - `files`（重复添加）：多个 `.md`/`.txt` 文件。
+  - `force_update`（可选）：布尔值，默认为 `false`。开启后批量更新同名文档。
+- **并发**：受 `BATCH_INGEST_CONCURRENCY` 控制。
 
 ### `POST /ingest/text`（在线文本入库）
 
@@ -60,14 +62,29 @@ docker run --env-file .env -p 8000:8000 highkay/stupidsimplerag:latest
 
 ```json
 {
-  "content": "# 文档正文…",          // 必填，Markdown 或纯文本
-  "filename": "optional_name.md"    // 选填，未提供则自动生成
+  "content": "# 文档正文…",
+  "filename": "optional_name.md",
+  "force_update": false           // 可选，是否覆盖更新
 }
 ```
 
-- **可选 Header**：`X-File-Mtime`，可使用 Unix 时间戳（秒/ms）或 ISO8601 字符串；若提供则作为该文档的业务日期写入元数据，否则使用当前 UTC 日期。
-- **行为**：复用同一套去重/切分/插入逻辑。
-- **响应**：`IngestResponse`。
+### `GET /documents`（列出文档）
+
+返回所有已入库的唯一文档列表：
+
+```json
+[
+  {
+    "filename": "20250228_NVIDIA_Report.md",
+    "date": "2025-02-28",
+    "chunks": 42
+  }
+]
+```
+
+### `DELETE /documents/{filename}`（删除文档）
+
+物理删除指定文件名的所有向量切片，并自动清理全局查询缓存。
 
 ### `POST /chat`（检索 + 生成）
 

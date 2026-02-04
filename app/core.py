@@ -1266,3 +1266,108 @@ async def adoc_exists(doc_hash: str) -> bool:
     except Exception as exc:
         logger.warning("adoc_exists check failed: %s", exc)
         return False
+
+
+async def delete_nodes_by_filename(filename: str) -> bool:
+    """Delete all nodes associated with a specific filename."""
+    if not filename:
+        return False
+    client = _build_async_client()
+    collection = getattr(vector_store, "collection_name", None)
+    if not collection:
+        return False
+    try:
+        await client.delete(
+            collection_name=collection,
+            points_selector=qdrant_models.Filter(
+                must=[
+                    qdrant_models.FieldCondition(
+                        key="filename", match=qdrant_models.MatchValue(value=filename)
+                    )
+                ]
+            ),
+        )
+        logger.info("Deleted all nodes for filename=%s", filename)
+        return True
+    except Exception as exc:
+        logger.error("Failed to delete nodes for filename=%s: %s", filename, exc)
+        return False
+
+
+async def check_filename_exists(filename: str) -> bool:
+    """Check if any nodes exist for a given filename."""
+    if not filename:
+        return False
+    client = _build_async_client()
+    collection = getattr(vector_store, "collection_name", None)
+    if not collection:
+        return False
+    try:
+        flt = qdrant_models.Filter(
+            must=[
+                qdrant_models.FieldCondition(
+                    key="filename", match=qdrant_models.MatchValue(value=filename)
+                )
+            ]
+        )
+        result = await client.scroll(
+            collection_name=collection,
+            scroll_filter=flt,
+            limit=1,
+            with_payload=False,
+        )
+        points = result[0]
+        return bool(points)
+    except Exception as exc:
+        logger.warning("check_filename_exists failed for %s: %s", filename, exc)
+        return False
+
+
+async def list_all_documents() -> List[dict]:
+    """
+    List unique documents in the collection by aggregating filename info.
+    Returns a list of dicts: [{'filename': str, 'date': str, 'chunks': int}]
+    """
+    client = _build_async_client()
+    collection = getattr(vector_store, "collection_name", None)
+    if not collection:
+        return []
+
+    docs = {}
+    offset = None
+    
+    # We use scroll to iterate through points and aggregate metadata in memory.
+    # For a RAG application, the number of chunks is typically manageable.
+    while True:
+        try:
+            result = await client.scroll(
+                collection_name=collection,
+                limit=1000,
+                offset=offset,
+                with_payload=["filename", "date"],
+                with_vectors=False,
+            )
+            points, next_offset = result
+            
+            for point in points:
+                payload = point.payload
+                fname = payload.get("filename")
+                if not fname:
+                    continue
+                
+                if fname not in docs:
+                    docs[fname] = {
+                        "filename": fname,
+                        "date": payload.get("date"),
+                        "chunks": 0
+                    }
+                docs[fname]["chunks"] += 1
+            
+            offset = next_offset
+            if offset is None:
+                break
+        except Exception as exc:
+            logger.error("Error scrolling documents for listing: %s", exc)
+            break
+            
+    return sorted(list(docs.values()), key=lambda x: x["filename"])

@@ -1,0 +1,39 @@
+<div class="overflow-x-auto">
+    <table class="table table-zebra w-full">
+        <thead>
+            <tr>
+                <th>Filename</th>
+                <th>Date</th>
+                <th>Chunks</th>
+                <th class="text-right">Actions</th>
+            </tr>
+        </thead>
+        <tbody id="document-table-body">
+            {% if documents %}
+                {% for doc in documents %}
+                <tr id="doc-row-{{ loop.index }}">
+                    <td class="font-medium">{{ doc.filename }}</td>
+                    <td>{{ doc.date or 'Unknown' }}</td>
+                    <td>
+                        <div class="badge badge-ghost">{{ doc.chunks }}</div>
+                    </td>
+                    <td class="text-right">
+                        <button 
+                            class="btn btn-error btn-xs"
+                            hx-delete="/ui/documents/{{ doc.filename }}"
+                            hx-target="#document-list-container"
+                            hx-confirm="Are you sure you want to delete '{{ doc.filename }}'?"
+                        >
+                            Delete
+                        </button>
+                    </td>
+                </tr>
+                {% endfor %}
+            {% else %}
+                <tr>
+                    <td colspan="4" class="text-center py-4 text-base-content/50">No documents found.</td>
+                </tr>
+            {% endif %}
+        </tbody>
+    </table>
+</div>
