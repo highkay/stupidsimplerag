@@ -10,6 +10,13 @@
         </thead>
         <tbody id="document-table-body">
             {% if documents %}
+                {% if documents|length >= 1000 %}
+                <tr>
+                    <td colspan="4" class="bg-warning/10 text-warning text-xs py-2 px-4 italic">
+                        注意：仅显示前 1000 个文档。如需精确管理，请使用 API 或搜索功能。
+                    </td>
+                </tr>
+                {% endif %}
                 {% for doc in documents %}
                 <tr id="doc-row-{{ loop.index }}">
                     <td class="font-medium">{{ doc.filename }}</td>

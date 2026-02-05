@@ -1427,7 +1427,7 @@ async def check_filename_exists(filename: str) -> bool:
         return False
 
 
-async def list_all_documents() -> List[dict]:
+async def list_all_documents(limit: int = 1000) -> List[dict]:
     """
     List unique documents in the collection by aggregating filename info.
     Returns a list of dicts: [{'filename': str, 'date': str, 'chunks': int}]
@@ -1439,10 +1439,10 @@ async def list_all_documents() -> List[dict]:
 
     docs = {}
     offset = None
+    points_scanned = 0
+    MAX_POINTS_TO_SCAN = 50000  # Safety cap to prevent infinite or extremely long scans
     
-    # We use scroll to iterate through points and aggregate metadata in memory.
-    # For a RAG application, the number of chunks is typically manageable.
-    while True:
+    while points_scanned < MAX_POINTS_TO_SCAN:
         try:
             result = await client.scroll(
                 collection_name=collection,
@@ -1452,7 +1452,9 @@ async def list_all_documents() -> List[dict]:
                 with_vectors=False,
             )
             points, next_offset = result
-            
+            if not points:
+                break
+                
             for point in points:
                 payload = point.payload
                 fname = payload.get("filename")
@@ -1460,6 +1462,8 @@ async def list_all_documents() -> List[dict]:
                     continue
                 
                 if fname not in docs:
+                    if len(docs) >= limit:
+                        continue # Keep counting chunks for existing ones but don't add new files
                     docs[fname] = {
                         "filename": fname,
                         "date": payload.get("date"),
@@ -1467,6 +1471,7 @@ async def list_all_documents() -> List[dict]:
                     }
                 docs[fname]["chunks"] += 1
             
+            points_scanned += len(points)
             offset = next_offset
             if offset is None:
                 break
