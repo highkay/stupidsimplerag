@@ -2,6 +2,8 @@ FROM python:3.13-slim
 
 WORKDIR /app
 
+ARG PIP_INDEX_URL=https://pypi.org/simple
+
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
@@ -22,7 +24,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
  && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
-RUN python -m pip install --no-cache-dir -r requirements.txt
+RUN python -m pip install --no-cache-dir --index-url ${PIP_INDEX_URL} -r requirements.txt
 
 # Preload FastEmbed cache into image (keeps runtime cold-start low)
 RUN mkdir -p ${FASTEMBED_CACHE_PATH}
