@@ -36,6 +36,7 @@ from app.openai_utils import (
     get_openai_config,
     get_openai_kwargs,
 )
+from app.time_utils import today_in_app_tz
 
 
 logger = logging.getLogger(__name__)
@@ -1098,6 +1099,8 @@ async def perform_hierarchical_search(
     scope: Optional[str] = None,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
+    filename: Optional[str] = None,
+    filename_contains: Optional[str] = None,
     keywords_any: Optional[List[str]] = None,
     keywords_all: Optional[List[str]] = None,
     top_docs: int = 3,
@@ -1108,7 +1111,13 @@ async def perform_hierarchical_search(
     2. Aggregate by filename to find Top N relevant documents
     3. Re-retrieve/Re-rank focused strictly on those documents (L2)
     """
-    logger.info("Starting hierarchical search query=%r scope=%s", query, scope)
+    logger.info(
+        "Starting hierarchical search query=%r scope=%s filename=%s contains=%s",
+        query,
+        scope,
+        filename,
+        filename_contains,
+    )
     
     # L1: Fast retrieval (skip rerank for speed, or keep it for better L1 precision? 
     # Let's keep rerank to ensure the "Summary" (if matched) actually bubbles up.
@@ -1120,6 +1129,8 @@ async def perform_hierarchical_search(
     engine_l1 = get_query_engine(
         start_date=start_date,
         end_date=end_date,
+        filename=filename,
+        filename_contains=filename_contains,
         scope=scope,
         skip_rerank=False, # Use rerank to get quality candidates for document selection
         keywords_any=keywords_any,
@@ -1323,7 +1334,7 @@ class TimeDecayPostprocessor(BaseNodePostprocessor):
         self._decay_rate = decay_rate
 
     def _postprocess_nodes(self, nodes: List[NodeWithScore], query_bundle: Optional[QueryBundle] = None) -> List[NodeWithScore]:
-        today = datetime.date.today()
+        today = today_in_app_tz()
         for node in nodes:
             metadata = getattr(node, "metadata", {}) or {}
             date_str = metadata.get("date")
@@ -1395,35 +1406,6 @@ async def delete_nodes_by_filename(filename: str) -> bool:
         return True
     except Exception as exc:
         logger.error("Failed to delete nodes for filename=%s: %s", filename, exc)
-        return False
-
-
-async def check_filename_exists(filename: str) -> bool:
-    """Check if any nodes exist for a given filename."""
-    if not filename:
-        return False
-    client = _build_async_client()
-    collection = getattr(vector_store, "collection_name", None)
-    if not collection:
-        return False
-    try:
-        flt = qdrant_models.Filter(
-            must=[
-                qdrant_models.FieldCondition(
-                    key="filename", match=qdrant_models.MatchValue(value=filename)
-                )
-            ]
-        )
-        result = await client.scroll(
-            collection_name=collection,
-            scroll_filter=flt,
-            limit=1,
-            with_payload=False,
-        )
-        points = result[0]
-        return bool(points)
-    except Exception as exc:
-        logger.warning("check_filename_exists failed for %s: %s", filename, exc)
         return False
 
 

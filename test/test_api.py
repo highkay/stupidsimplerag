@@ -1,7 +1,5 @@
-import pytest
 from io import BytesIO
 import time
-import os
 
 def test_full_workflow_real_service(client):
     """
@@ -26,7 +24,6 @@ def test_full_workflow_real_service(client):
     """
     file = (fname, BytesIO(content.encode("utf-8")), "text/markdown")
     
-    print(f"\n[Step] Ingesting {fname} (Real LLM/Embedding)...")
     resp_ingest = client.post(
         "/ingest",
         files={"file": file},
@@ -36,7 +33,6 @@ def test_full_workflow_real_service(client):
     res_data = resp_ingest.json()
     assert res_data["status"] == "ok"
     assert res_data["chunks"] > 0
-    print(f"Success: Created {res_data['chunks']} chunks.")
 
     # 3. 验证列表显示
     time.sleep(1) # 等待 Qdrant 写入确认
@@ -55,7 +51,6 @@ def test_full_workflow_real_service(client):
     chat_data = resp_chat.json()
     # 验证是否检索到了刚才上传的文件
     assert any(s["filename"] == fname for s in chat_data["sources"])
-    print(f"Success: Found source with score {chat_data['sources'][0]['score']}")
 
     # 5. 删除清理
     resp_del = client.delete(f"/documents/{fname}")
@@ -65,4 +60,3 @@ def test_full_workflow_real_service(client):
     time.sleep(1)
     resp_list_final = client.get("/documents")
     assert not any(d["filename"] == fname for d in resp_list_final.json())
-    print("Cleanup: Document deleted successfully.")

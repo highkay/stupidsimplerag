@@ -1,193 +1,237 @@
 # stupidsimplerag
 
-专用、高效、节省资源的单机 RAG：重预处理，轻运行时。入库阶段用 LLM 生成摘要/表格解读/同义词，查询阶段依靠 Qdrant 混合检索 + API Rerank + 应用层时间衰减拿到稳态回答。
+专用、高效、节省资源的单机 RAG：重预处理，轻运行时。
+
+入库阶段通过 LLM 把原始文档转成“富语义切片”（摘要 / 表格叙述 / 关键词），查询阶段使用 Qdrant 混合检索（Dense + Sparse）+ 可选 Rerank + 时间衰减，兼顾质量与成本。
+
+## 架构与能力
+
+- FastAPI 无状态服务，内置 1 小时 TTLCache 查询缓存。
+- 入库 ETL：`chonkie` 切分 + LLM 三合一分析 + metadata 注入。
+- 检索链路：Hybrid Retrieval -> 可选 Rerank -> 内容过滤 -> 关键词过滤 -> 时间衰减。
+- 存储：单集合 Qdrant（Dense `text-dense` + Sparse BM42）。
+- 前端：内置 HTMX + Jinja2 控制台（仪表盘、上传、查询、文档管理）。
+
+## 项目结构
+
+```text
+/stupidsimplerag
+├── app/
+│   ├── __init__.py              # 自动加载 .env + 初始化日志
+│   ├── main.py                  # FastAPI 路由（API + UI）
+│   ├── core.py                  # Qdrant、检索引擎、Rerank、后处理器
+│   ├── ingest.py                # 文档分析与切分
+│   ├── models.py                # Pydantic 请求/响应模型
+│   ├── openai_utils.py          # OpenAI 兼容配置与 LLM 包装
+│   ├── logging_config.py        # Loguru/stdlib 日志桥接
+│   ├── templates/               # Jinja2 页面与 HTMX partial
+│   └── static/                  # CSS/Favicon
+├── offline_ingest.py            # 离线批量入库脚本
+├── reset_qdrant.py              # 危险：删除并重建集合
+├── preload_models.py            # 预下载 FastEmbed 稀疏模型
+├── test/                        # 集成与功能测试
+├── Dockerfile
+├── docker-compose.yml
+└── AGENTS.md
+```
 
 ## 快速启动
 
 ```bash
 git clone <repo>
 cd stupidsimplerag
-cp .env.example .env  # 补齐模型、Qdrant 配置
-docker compose up -d   # 默认使用 highkay/stupidsimplerag:latest 镜像
+cp .env.example .env
+docker compose up -d
 ```
 
-容器会拉起 `qdrant` 和 `api`，FastAPI/Gunicorn 默认监听 `localhost:8005` (转发到容器 8000)。
+默认 `docker-compose.yml` 使用镜像 `highkay/stupidsimplerag:latest`：
 
-直接用 Docker 运行（不含 Qdrant）：
+- API: `http://localhost:8005`（容器内 8000）
+- Qdrant: `http://localhost:6333`
+
+本地开发（不走容器）：
+
 ```bash
-docker run --env-file .env -p 8000:8000 highkay/stupidsimplerag:latest
+pip install -r requirements.txt
+uvicorn app.main:app --reload
 ```
 
-## HTTP API 一览
+## HTTP API
 
-| Endpoint | Method | 载荷类型 | 用途 |
-| --- | --- | --- | --- |
-| `/ingest` | `POST` | `multipart/form-data` | 单文件入库，自动切分并生成富语义头部。 |
-| `/ingest/batch` | `POST` | `multipart/form-data` | 批量入库，支持混合成功与部分失败的反馈。 |
-| `/ingest/text` | `POST` | `application/json` | 直接推送 Markdown/TXT 字符串。 |
-| `/documents` | `GET` | `-` | 列出所有已入库的文档及其切片数。 |
-| `/documents/{filename}` | `DELETE` | `-` | 按文件名物理删除文档及其所有向量切片。 |
-| `/chat` | `POST` | `application/json` | 检索 + 生成，支持多种过滤器。 |
-| `/chat/lod` | `POST` | `application/json` | **LOD 两阶段检索**：先定位 Top 文档，再聚焦生成，适合长尾知识召回。 |
+### 入库
 
-每个入库请求都会返回 `IngestResponse`（或其数组），包含入库状态与 `doc_hash`。
+| Endpoint | Method | 说明 |
+| --- | --- | --- |
+| `/ingest` | `POST` | 单文件入库（`multipart/form-data`） |
+| `/ingest/batch` | `POST` | 批量入库（`files` 多字段） |
+| `/ingest/text` | `POST` | 直接上传文本（`application/json`） |
 
-### `POST /ingest`（单文件入库）
+`/ingest` 与 `/ingest/batch`：
 
-- **字段**：
-  - `file`（必填）：`.md`/`.txt` 文件。
-  - `force_update`（可选）：布尔值，默认为 `false`。若为 `true`，将先删除同名旧文档的所有切片再重新入库。
-  - `scope`（可选）：逻辑命名空间（如 `reports/2025`），用于隔离或层级过滤。
-- **可选 Header**：`X-File-Mtime`，业务日期。
-- **响应 (`IngestResponse`)**
+- 支持 `.md` / `.txt`
+- `force_update`（可选）：`true` 时先删同名文档再重建
+- `scope`（可选）：逻辑命名空间，写入 metadata
+- 可选请求头 `X-File-Mtime`：支持 Unix 时间戳（秒/毫秒）或 ISO 时间，按 `APP_TIMEZONE`（或 `TZ`）归一为日期
+
+`/ingest/text` 请求体：
 
 ```json
 {
-  "status": "ok | skipped",
-  "chunks": 12,
-  "filename": "20250228_NVIDIA_Report.md",
-  "doc_hash": "b9c8e4...",
-  "scope": "reports/2025",
-  "error": null
-}
-```
-
-### `POST /ingest/batch`（批量入库）
-
-- **字段**：
-  - `files`（重复添加）：多个 `.md`/`.txt` 文件。
-  - `force_update`（可选）：布尔值，默认为 `false`。开启后批量更新同名文档。
-  - `scope`（可选）：批量指定逻辑命名空间。
-- **并发**：受 `BATCH_INGEST_CONCURRENCY` 控制。
-
-### `POST /ingest/text`（在线文本入库）
-
-- **请求体**
-
-```json
-{
-  "content": "# 文档正文…",
-  "filename": "optional_name.md",
+  "content": "# 文档正文",
+  "filename": "optional.md",
   "force_update": false,
-  "scope": "optional/scope"
+  "scope": "reports/2025"
 }
 ```
 
-### `GET /documents`（列出文档）
+### 查询与检索
 
-返回所有已入库的唯一文档列表：
+| Endpoint | Method | 说明 |
+| --- | --- | --- |
+| `/chat` | `POST` | 标准检索 + 可选生成 |
+| `/chat/lod` | `POST` | 两阶段 LOD 检索（先选文档，再聚焦生成，支持 `filename`/`filename_contains` 过滤） |
 
-```json
-[
-  {
-    "filename": "20250228_NVIDIA_Report.md",
-    "date": "2025-02-28",
-    "chunks": 42
-  }
-]
-```
+`/chat` 支持字段：
 
-### `DELETE /documents/{filename}`（删除文档）
+- `query`（必填）
+- `start_date` / `end_date`
+- `filename`（精确匹配）
+- `filename_contains`（不区分大小写模糊匹配）
+- `keywords_any` / `keywords_all`
+- `scope`
+- `skip_rerank`（跳过重排）
+- `skip_generation`（仅返回切片，不调用生成）
 
-物理删除指定文件名的所有向量切片，并自动清理全局查询缓存。
-
-### `POST /chat`（检索 + 生成）
-
-| 字段 | 类型 | 必填 | 说明 |
-| --- | --- | --- | --- |
-| `query` | `string` | 是 | 用户问题，纯文本。 |
-| `start_date` | `YYYY-MM-DD` | 否 | 起始日期（包含），用于 Qdrant 元数据过滤。 |
-| `end_date` | `YYYY-MM-DD` | 否 | 结束日期（包含）。 |
-| `filename` | `string` | 否 | 精确文件名过滤。 |
-| `filename_contains` | `string` | 否 | 对文件名做大小写不敏感的包含匹配。 |
-| `keywords_any` | `string[]` | 否 | 仅返回命中任意关键词的切片。 |
-| `keywords_all` | `string[]` | 否 | 仅返回同时覆盖所有关键词的切片。 |
-| `scope` | `string` | 否 | 精确匹配逻辑命名空间。 |
-| `skip_rerank` | `bool` | 否 | 跳过 Rerank，直接返回相似度排序。 |
-| `skip_generation` | `bool` | 否 | 跳过回答生成，仅返回切片。 |
-
-- **响应 (`ChatResponse`)**
-
-```json
-{
-  "answer": "LLM 生成的回答",
-  "sources": [
-    {
-      "filename": "20250228_NVIDIA_Report.md",
-      "date": "2025-02-28",
-      "score": 0.8431,
-      "keywords": "NVDA,英伟达,GPU",
-      "text": "原始文档切片前 200 字..."
-    }
-  ]
-}
-```
-
-返回结果会先经过 Qdrant 混合检索 + API Rerank，再套用 `keywords_*` 过滤和 `apply_time_decay`；`FINAL_TOP_K` 控制最终 `sources` 数量，TTL 缓存以 `query + date/filename/keyword` 组合为键缓存 1 小时。
-
-### 示例
+示例：
 
 ```bash
-# 单文件入库（可选 X-File-Mtime header）
-curl -X POST http://localhost:8000/ingest \
-  -H "X-File-Mtime: 1704067200" \
-  -F "file=@./docs/sample_report.md"
-
-# 文本入库（支持 X-File-Mtime header）
-curl -X POST http://localhost:8000/ingest/text \
-  -H "Content-Type: application/json" \
-  -H "X-File-Mtime: 2025-01-01T00:00:00Z" \
-  -d '{"filename":"20250301_NVDA.md","content":"# 财报\\n..."}'
-
-# 检索查询
 curl -X POST http://localhost:8000/chat \
   -H "Content-Type: application/json" \
   -d '{
-    "query":"英伟达最新财报表现",
-    "start_date":"2025-01-01",
-    "skip_rerank": true,
+    "query": "英伟达最新财报表现",
+    "start_date": "2025-01-01",
+    "keywords_any": ["NVDA", "GPU"],
     "skip_generation": true
   }'
 ```
 
-## 工作流速览
+### 文档管理
 
-1. **预处理**：Chonkie 按 token 切分 → LLM 一次性生成 `summary/table_narrative/keywords` → 生成富语义 header 并拼接到每个 chunk。
-2. **入库**：TextNode 携带 `filename/date/keywords/original_text/doc_hash` 写入 Qdrant 混合集合（Dense + FastEmbed BM42 Sparse），`doc_hash=sha256(content)` 用于跳过重复入库；节点 ID 由 `doc_hash + chunk_id` 哈希保证幂等/复用。
-3. **查询**：LlamaIndex QueryEngine 走 hybrid 检索（Top-K=100，可选时间过滤）→ API rerank Top-N=20 → `apply_time_decay` 线性衰减旧文档分数 → 保留 FINAL_TOP_K 命中。
-4. **服务层**：FastAPI + TTLCache 以 `query+date_range` 为 key 做 1 小时语义缓存；Markdown-only 入库保证运行时简单可靠。
+| Endpoint | Method | 说明 |
+| --- | --- | --- |
+| `/documents` | `GET` | 列出文档（按 filename 聚合） |
+| `/documents/{filename}` | `DELETE` | 删除该文档全部切片，并清空查询缓存 |
 
-## 关键配置 (.env)
+## Web 控制台
 
-- **LLM / Embedding / Rerank**：`LLM_MODEL`, `OPENAI_API_KEY`, `EMBEDDING_MODEL`, `EMBEDDING_DIM`, `RERANK_API_URL`（填 OpenAI 兼容基础地址，走 `/v1/chat/completions`，如 `https://api.siliconflow.cn/v1` 或 HuggingFace OpenAI Proxy），`RERANK_MODEL`（推荐 `Qwen/Qwen3-Reranker-4B`）。默认遵循 OpenAI 兼容协议。
-- **Qdrant**：`QDRANT_HOST`, `QDRANT_PORT`, `QDRANT_URL`, `QDRANT_API_KEY`, `COLLECTION_NAME`, `QDRANT_HTTPS`。如使用托管集群，只需填 URL + API Key。
-- **策略**：`TOP_K_RETRIEVAL`, `TOP_N_RERANK`, `FINAL_TOP_K`, `TIME_DECAY_RATE`, `SPARSE_TOP_K`。可按业务调优 recall / latency。
-- **FastEmbed 缓存**：`FASTEMBED_CACHE_PATH`, `FASTEMBED_SPARSE_MODEL`；`preload_models.py` 可提前把 BM42 模型下载到镜像。
-- **日志**：统一使用 `LOG_LEVEL` 控制（默认 INFO），无需额外的模块级配置。设置为 `debug` 可查看入库 LLM/Embedding 细节。
+| 页面/接口 | 说明 |
+| --- | --- |
+| `/` | Dashboard（Qdrant 状态、缓存状态、配置快照） |
+| `/ui/upload` | 单文件上传页面 |
+| `/ui/upload/batch` | 批量上传页面 |
+| `/ui/chat` | 查询页面 |
+| `/ui/documents` | 文档列表 partial |
+| `/ui/documents/{filename}` | 删除文档（HTMX） |
 
-## 本地开发
+说明：UI 表单默认 `accept=.md`，但后端 API 实际支持 `.md` 和 `.txt`。
+
+## 关键实现细节（与代码一致）
+
+1. 去重与幂等
+- `doc_hash = sha256(content)`。
+- 若存在同 `doc_hash` 且未 `force_update`，入库返回 `status=skipped`。
+- 节点 ID 使用 `md5(doc_hash + chunk_idx)`，避免重复写入。
+
+2. 检索后处理顺序
+- `APIReranker`（可跳过）
+- `ContentFilterPostprocessor`
+- `KeywordFilterPostprocessor`
+- `TimeDecayPostprocessor`
+
+3. Rerank 协议兼容
+- `RERANK_API_URL` 包含 `/rerank`：按 rerank endpoint 协议调用。
+- 否则按 OpenAI Chat Completions 协议调用重排模型。
+
+4. 缓存行为
+- `/chat` 结果使用 TTLCache（1h）。
+- 缓存键包含 query、日期范围、文件过滤、关键词过滤、skip 标志、scope。
+- 任一入库接口成功写入新切片后会清空查询缓存。
+- `/chat/lod` 当前不缓存。
+
+5. 时区基线
+- 应用统一使用 `APP_TIMEZONE`（回退 `TZ`，默认 `Asia/Shanghai`）。
+- 时间戳解析、`/ingest/text` 默认日期、时间衰减均按同一时区计算。
+
+## 配置说明（.env）
+
+### 核心配置
+
+- `LLM_MODEL`, `OPENAI_API_KEY`, `OPENAI_API_BASE`
+- `EMBEDDING_MODEL`, `EMBEDDING_API_KEY`, `EMBEDDING_API_BASE`, `EMBEDDING_DIM`
+- `RERANK_API_URL`, `RERANK_API_KEY`, `RERANK_MODEL`
+- `QDRANT_HOST`, `QDRANT_PORT`, `QDRANT_URL`, `QDRANT_API_KEY`, `COLLECTION_NAME`
+- `APP_TIMEZONE`（默认 `Asia/Shanghai`）、`TZ`（容器系统时区，建议与 `APP_TIMEZONE` 一致）
+
+### 检索与策略
+
+- `TOP_K_RETRIEVAL`
+- `TOP_N_RERANK`
+- `FINAL_TOP_K`
+- `SPARSE_TOP_K`
+- `TIME_DECAY_RATE`
+
+### 并发 / 重试 / 超时（高级）
+
+- `LLM_CONTEXT_WINDOW`, `LLM_CONCURRENCY`, `LLM_MAX_RETRIES`, `LLM_RETRY_BACKOFF`
+- `EMBEDDING_MAX_RETRIES`, `EMBEDDING_RETRY_BACKOFF`
+- `RERANK_TIMEOUT`, `RERANK_MAX_RETRIES`, `RERANK_RETRY_BACKOFF`, `RERANK_RETURN_DOCUMENTS`
+- `INSERT_BATCH_SIZE`, `INGEST_INSERT_MAX_RETRIES`, `INGEST_INSERT_RETRY_BACKOFF`
+- `QUERY_MAX_RETRIES`, `QUERY_RETRY_BACKOFF`
+- `BATCH_INGEST_CONCURRENCY`, `BATCH_MAX_FILES`
+- `QDRANT_CLIENT_TIMEOUT`
+
+### 日志
+
+- `APP_LOG_LEVEL`（优先）
+- `LOG_LEVEL`
+
+## 运维脚本
+
+1. `offline_ingest.py`
+- 递归导入目录下 `.md/.txt` 或单文件。
+- 支持 `--batch-size`、`--skip-completed`、`--progress-file`、`--max-retries`、`--dry-run`。
+- 批量模式对超时采用指数退避重试。
+
+2. `reset_qdrant.py`
+- 删除并重建集合（危险操作）。
+- 默认会交互确认；`-y` 跳过确认。
+
+3. `preload_models.py`
+- 提前下载 FastEmbed 稀疏模型到 `FASTEMBED_CACHE_PATH`。
+
+## 测试
 
 ```bash
-pip install -r requirements.txt
-uvicorn app.main:app --reload  # 默认读取 .env
-curl -X POST http://localhost:8000/ingest -F "file=@docs/sample.md"
-curl -X POST http://localhost:8000/chat -H "Content-Type: application/json" -d '{"query":"英伟达最新财报表现"}'
+pytest -q
 ```
 
-常见操作：
+当前测试构成：
 
-- Markdown 需在入库前完成转换（爬虫/ETL 阶段处理 PDF/TXT）。
-- 若调整 `EMBEDDING_DIM`，请清空 `qdrant_data` 以重新建集合。
-- 连接托管 Qdrant 时可用 `curl -X GET <QDRANT_URL>` + `api-key` 快速做健康检查。
-- 离线批量导入：`python offline_ingest.py --dir ./docs --api-base http://127.0.0.1:8000 --batch-size 4`，递归读取 `.md/.txt` 并调用 `/ingest` 或 `/ingest/batch`，可用 `--dry-run` 预览。
-- 重置 Qdrant 集合：`python reset_qdrant.py -y` 会按 `.env` 中的 `COLLECTION_NAME` 与 `EMBEDDING_DIM` 删除并重建集合（危险操作，务必确认目标环境）。
+- `test/test_features_scope.py`：Mock 测试（scope 透传、LOD 路由）。
+- `test/test_offline_ingest.py`：离线批量入库脚本的批次结果处理测试。
+- `test/test_api.py`：真实链路测试（依赖可用的 LLM/Embedding/Qdrant）。
 
-## CI / 镜像发布
+提示：`test/conftest.py` 会把 `COLLECTION_NAME` 改为 `pytest_integration_test`，避免污染默认集合。
 
-- GitHub Actions (`.github/workflows/docker-publish.yml`) 在 `main` 推送时自动构建并推送镜像到 Docker Hub `highkay/stupidsimplerag`（标签：`latest` 与 commit `sha`）。需要仓库 secrets：`DOCKERHUB_USERNAME`、`DOCKERHUB_TOKEN`。
-- 生产容器使用 `gunicorn -k uvicorn.workers.UvicornWorker`，默认 `GUNICORN_WORKERS=2`、`GUNICORN_THREADS=1`，可在运行时通过环境变量覆盖。
+## Docker 与 CI
 
-## 了解更多
+- Dockerfile 使用 `python:3.13-slim`，启动命令为 Gunicorn + Uvicorn worker。
+- 镜像内默认 `TZ=Asia/Shanghai`，并安装 `tzdata`；`docker-compose` 同步为 `api`/`qdrant` 注入 `TZ`。
+- 镜像构建阶段会执行 `preload_models.py` 预热 BM42。
+- GitHub Actions（`.github/workflows/docker-publish.yml`）在 `main` 相关文件变更时自动推送镜像：
+  - `highkay/stupidsimplerag:latest`
+  - `highkay/stupidsimplerag:<commit_sha>`
 
-- 架构细节、Prompt、数据模型请参考 `AGENTS.md` 与 `app/*.py` 源码，那里涵盖全量实现。
-- 想提前热身稀疏模型，可运行 `python preload_models.py` 加速第一次部署。
+## 关联文档
+
+- 维护者/代理协作规则与代码约束：`AGENTS.md`

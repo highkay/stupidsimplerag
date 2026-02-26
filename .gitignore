@@ -2,4 +2,8 @@ model_cache
 qdrant_data
 .env
 __pycache__
+.pytest_cache
+.ruff_cache
 .vscode
+.ace-tool/
+test/813*.md

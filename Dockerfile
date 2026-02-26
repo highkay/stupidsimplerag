@@ -5,6 +5,8 @@ WORKDIR /app
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    TZ=Asia/Shanghai \
+    APP_TIMEZONE=Asia/Shanghai \
     HF_ENDPOINT=https://hf-mirror.com \
     HF_HUB_ENABLE_HF_TRANSFER=0 \
     FASTEMBED_CACHE_PATH=/app/model_cache \
@@ -16,6 +18,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     curl \
+    tzdata \
  && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .

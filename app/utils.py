@@ -1,16 +1,17 @@
 import datetime
 import os
 import re
-from typing import List, MutableSequence
 
 from dateutil import parser
 from llama_index.core.schema import NodeWithScore
+
+from app.time_utils import datetime_from_epoch, today_in_app_tz
 
 
 def extract_date_from_filename(filename: str) -> str | None:
     """Extract YYYY-MM-DD from complex filenames using timestamp + pattern fallbacks."""
     base_name = os.path.basename(filename)
-    today = datetime.date.today()
+    today = today_in_app_tz()
     current_year = today.year
 
     ts_match = re.search(r"(^|[^0-9])(\d{10}|\d{13})([^0-9]|$)", base_name)
@@ -19,7 +20,7 @@ def extract_date_from_filename(filename: str) -> str | None:
             ts = float(ts_match.group(2))
             if ts > 3_000_000_000:
                 ts /= 1000
-            return datetime.datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
+            return datetime_from_epoch(ts).strftime("%Y-%m-%d")
         except Exception:
             pass
 
@@ -64,29 +65,3 @@ def get_node_metadata(node: NodeWithScore) -> dict:
     if inner is not None and hasattr(inner, "metadata"):
         return inner.metadata
     return {}
-
-
-def apply_time_decay(nodes: MutableSequence[NodeWithScore], decay_rate: float = 0.005) -> List[NodeWithScore]:
-    """Apply linear time decay to reranked nodes in-place and return sorted list."""
-    today = datetime.date.today()
-    for node in nodes:
-        metadata = get_node_metadata(node)
-        date_str = metadata.get("date")
-        if not date_str:
-            continue
-
-        try:
-            doc_date = datetime.datetime.strptime(date_str, "%Y-%m-%d").date()
-        except ValueError:
-            continue
-
-        delta_days = (today - doc_date).days
-        if delta_days <= 0:
-            continue
-
-        decay_factor = 1.0 / (1.0 + decay_rate * delta_days)
-        if node.score is not None:
-            node.score *= decay_factor
-
-    nodes.sort(key=lambda x: (x.score or 0.0), reverse=True)
-    return list(nodes)

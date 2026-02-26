@@ -10,7 +10,6 @@ llama-index-vector-stores-qdrant
 qdrant-client
 chonkie
 fastembed
-python-frontmatter
 pydantic
 httpx
 python-dateutil

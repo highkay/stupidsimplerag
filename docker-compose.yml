@@ -7,6 +7,7 @@ services:
       - ./qdrant_data:/qdrant/storage
     environment:
       - QDRANT__STORAGE__OPTIMIZERS__DELETED_THRESHOLD=0.5
+      - TZ=${TZ:-Asia/Shanghai}
     restart: always
 
   api:
@@ -15,6 +16,9 @@ services:
     ports:
       - "8005:8000"
     env_file: .env
+    environment:
+      - TZ=${TZ:-Asia/Shanghai}
+      - APP_TIMEZONE=${APP_TIMEZONE:-Asia/Shanghai}
     depends_on:
       - qdrant
     restart: always

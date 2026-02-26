@@ -1,545 +1,201 @@
-# stupidsimplerag 是一个 **金融级、单机高性能 RAG 最终技术方案**。
+# AGENTS.md
 
-本方案的核心理念是 **“重预处理，轻运行时”**：在入库阶段利用 LLM 将非结构化文档转化为“富语义文档”（含摘要、表格解读、同义词），从而在查询阶段利用低成本的混合检索和逻辑运算实现高精度召回。
+本文件面向维护者与代码代理，描述 **当前仓库真实实现**、关键约束与改动时的联动检查点。
 
------
+## 1. 项目定位
 
-### 1\. 架构总览
+`stupidsimplerag` 是一个单机高性能 RAG 服务，核心策略是：
 
-  * **接入层 (FastAPI)**: 提供无状态 RESTful 接口，内置 LRU 语义缓存。
-  * **计算层 (Python)**:
-      * **ETL**: Chonkie 极速切分 + LLM 三合一预处理 (摘要/表格/同义词)。
-      * **策略**: 应用层时间衰减算法 + 多策略文件名解析。
-  * **存储层 (Qdrant)**: 单机硬盘索引 (On-Disk Indexing)，混合检索 (Dense + Sparse/BM42)。
-  * **模型层 (API + Local)**:
-      * LLM/Embedding/Rerank: 全部通过 OpenAI 兼容协议调用外部 API (如 DeepSeek, SiliconFlow)。
-      * Sparse Embedding: 本地 FastEmbed (CPU, 轻量级)。
+- 入库阶段重处理：LLM 提取摘要/表格叙述/关键词，构建富语义切片。
+- 查询阶段轻逻辑：混合检索 + 可选 Rerank + 应用层过滤与时间衰减。
 
------
+## 2. 实际运行架构
 
-### 2\. 项目结构
+1. 接入层（`app/main.py`）
+- FastAPI API + HTMX/Jinja2 控制台。
+- `TTLCache(maxsize=1000, ttl=3600)` 做查询缓存。
 
-```text
-/stupidsimplerag
-├── .env                    # 核心配置文件
-├── docker-compose.yml      # 容器编排
-├── Dockerfile              # API 镜像构建
-├── requirements.txt        # Python 依赖
-└── app
-    ├── __init__.py
-    ├── main.py             # FastAPI 入口 & 缓存逻辑
-    ├── core.py             # RAG 核心 (Qdrant, Rerank, Engine)
-    ├── ingest.py           # 入库流水线 (LLM预处理, Chonkie切分)
-    ├── utils.py            # 工具函数 (日期解析, 时间衰减)
-    └── models.py           # Pydantic 数据模型
-```
+2. 计算层
+- `app/ingest.py`：文档分析、切分、metadata 注入。
+- `app/core.py`：Embedding/Rerank/Qdrant 初始化与检索链路。
 
-> 说明：项目的实际仓库名称为 `stupidsimplerag`，上面的结构即当前仓库根目录下的布局。
+3. 存储层
+- Qdrant 单集合（Dense: `text-dense`；Sparse: BM42）。
+- 自动创建 payload index：`date_numeric`、`doc_hash`、`scope`。
 
-#### API 数据模型 (`app/models.py`)
+4. 模型层
+- LLM/Embedding/Rerank 均走 OpenAI 兼容协议。
+- Rerank 同时支持 `/rerank` endpoint 与 `/chat/completions` 风格。
 
-`app/models.py` 集中定义 FastAPI 接口使用的 Pydantic 数据结构，常用模型包括：
+## 3. 代码地图（按职责）
 
-- `ChatRequest`：字段为 `query` (必填)、`start_date`、`end_date`（YYYY-MM-DD，可选），与 `app/main.py` 中的入参保持一致。
-- `SourceItem` / `ChatResponse`（或等价返回模型）：封装推理结果，包含 `answer` 以及若干 `sources`（每个包含 `filename`、`date`、`score`、`keywords`、`text`）。
+- `app/__init__.py`
+  - 自动加载 `.env`。
+  - 初始化日志桥接（`configure_logging`）。
 
-示例请求与响应：
+- `app/main.py`
+  - API 路由：`/ingest`、`/ingest/batch`、`/ingest/text`、`/chat`、`/chat/lod`、`/documents`。
+  - UI 路由：`/`、`/ui/upload`、`/ui/upload/batch`、`/ui/chat`、`/ui/documents`。
+  - 关键行为：缓存键构造、重试策略、成功入库后缓存失效、force_update 删除重建、HTMX 入口。
+
+- `app/ingest.py`
+  - `compute_doc_hash(content)`（SHA256）。
+  - `analyze_document()`：LLM 返回 `LLMAnalysis`。
+  - `process_file()`：切片并写 metadata。
+
+- `app/core.py`
+  - Embedding 封装（OpenAI 原生 + fallback 到兼容 REST）。
+  - `APIReranker`（双协议 + 重试 + 同步/异步）。
+  - `get_query_engine()`：统一组装过滤器与后处理器链。
+  - Qdrant 文档管理：`adoc_exists`、`delete_nodes_by_filename`、`list_all_documents`。
+
+- `app/models.py`
+  - `ChatRequest` / `ChatResponse` / `IngestResponse` / `DocumentInfo` / `TextIngestRequest` / `LLMAnalysis`。
+
+- `app/openai_utils.py`
+  - API key/base 分派逻辑。
+  - `OpenAICompatibleLLM` 支持多模型逗号轮询。
+
+- `app/utils.py`
+  - 文件名日期提取：时间戳、`YYYYMMDD`、`MMDD`、两位年份兜底。
+  - 兼容 `NodeWithScore` metadata 访问。
+
+- 运维脚本
+  - `offline_ingest.py`：离线递归入库与进度跟踪。
+  - `reset_qdrant.py`：危险重置集合。
+  - `preload_models.py`：预下载 FastEmbed 稀疏模型。
+
+## 4. API 合同（当前实现）
+
+### 4.1 入库
+
+1. `POST /ingest`
+- `multipart/form-data`：`file` + 可选 `force_update`、`scope`。
+- 支持 `.md` / `.txt`。
+- 可选 header：`X-File-Mtime`（Unix 秒/毫秒 或 ISO）。
+
+2. `POST /ingest/batch`
+- `files` 多文件上传。
+- 受 `BATCH_MAX_FILES` 与 `BATCH_INGEST_CONCURRENCY` 约束。
+
+3. `POST /ingest/text`
+- JSON：`content`、可选 `filename`、`force_update`、`scope`。
+- 若无可解析 `X-File-Mtime`，默认使用应用时区当天日期（`APP_TIMEZONE`，回退 `TZ`，默认 `Asia/Shanghai`）。
+
+入库响应模型统一为 `IngestResponse`：
 
 ```json
-POST /chat
-Request:
 {
-  "query": "英伟达最新财报表现",
-  "start_date": "2025-01-01"
-}
-
-Response:
-{
-  "answer": "...生成的自然语言回答...",
-  "sources": [
-    {
-      "filename": "20250228_NVIDIA_Report.md",
-      "date": "2025-02-28",
-      "score": 0.8431,
-      "keywords": "NVDA,英伟达,GPU",
-      "text": "原始文档切片前200字..."
-    }
-  ]
+  "status": "ok|skipped|error",
+  "chunks": 12,
+  "filename": "example.md",
+  "doc_hash": "...",
+  "scope": "reports/2025",
+  "error": null
 }
 ```
 
------
+### 4.2 查询
 
-### 3\. 配置文件 (.env)
+1. `POST /chat`
+- 过滤维度：日期范围、filename 精确、filename_contains 模糊、`keywords_any/all`、`scope`。
+- `skip_rerank`：跳过重排。
+- `skip_generation`：只跑检索，回答由切片拼接兜底。
 
-请根据你的 API 供应商填写。
+2. `POST /chat/lod`
+- 两阶段：L1 选 Top 文档 -> L2 仅在这些文档中检索并生成。
+- 过滤维度与 `/chat` 对齐：支持 `filename` 与 `filename_contains`。
+- 当前不接入缓存。
 
-```ini
-# --- 模型服务配置 (OpenAI 兼容协议) ---
-# 用于生成回答、摘要预处理
-LLM_MODEL=deepseek-chat
-OPENAI_API_KEY=sk-xxxxxx
-OPENAI_API_BASE=https://api.deepseek.com/v1
+### 4.3 文档管理
 
-# 用于 Dense Vector (768/1024/1536维均可)
-EMBEDDING_MODEL=text-embedding-3-small
-EMBEDDING_API_KEY=sk-xxxxxx
-EMBEDDING_API_BASE=https://api.deepseek.com/v1
-EMBEDDING_DIM=1536
-SPARSE_TOP_K=12
+- `GET /documents`：按 filename 聚合并返回 chunk 数。
+- `DELETE /documents/{filename}`：删除全部切片并清缓存。
 
-# 用于 Rerank (建议用 BAAI/bge-reranker-v2-m3)
-RERANK_API_URL=https://api.siliconflow.cn/v1/rerank
-RERANK_API_KEY=sk-xxxxxx
-RERANK_MODEL=BAAI/bge-reranker-v2-m3
+## 5. 检索与排序流水线
 
-# --- Qdrant 数据库配置 ---
-QDRANT_HOST=qdrant
-QDRANT_PORT=6333
-QDRANT_HTTPS=false
-QDRANT_URL=
-QDRANT_API_KEY=
-COLLECTION_NAME=financial_reports
+`get_query_engine()` 组装顺序：
 
-# --- 策略配置 ---
-TOP_K_RETRIEVAL=100     # 初筛数量 (广撒网)
-TOP_N_RERANK=20         # Rerank后保留数量 (为时间衰减留余地)
-FINAL_TOP_K=10          # 最终返回给用户的数量
-TIME_DECAY_RATE=0.005   # 时间衰减速率
-```
+1. Qdrant metadata filter
+- `date_numeric` 范围过滤
+- `filename` 精确匹配
+- `filename_contains` 文本匹配（不区分大小写）
+- `scope` 精确匹配
+- `filenames_in`（LOD 二阶段）
 
-> 若使用托管 Qdrant 集群，将 `QDRANT_URL=https://<cluster-host>:6333`、`QDRANT_API_KEY=<token>`。可通过以下命令验证连通性：
->
-> ```bash
-> curl -X GET 'https://<waiting-for-cluster-host>:6333' \
->   --header 'api-key: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhY2Nlc3MiOiJtIn0.JxVRUBtR2jfv4XxYRvFYnBArICgRzhbPv_b3zScsANo'
-> ```
+2. Postprocessor 链（按顺序）
+- `APIReranker`（可跳过）
+- `ContentFilterPostprocessor`
+- `KeywordFilterPostprocessor`
+- `TimeDecayPostprocessor`
 
------
+## 6. Metadata 约束（切片入库）
 
-### 4\. 依赖列表 (requirements.txt)
+`process_file()` 生成节点 metadata 字段：
 
-```text
-fastapi
-uvicorn
-python-multipart
-# LlamaIndex 核心组件
-llama-index-core
-llama-index-llms-openai
-llama-index-embeddings-openai
-llama-index-vector-stores-qdrant
-qdrant-client
-# 极速切分
-chonkie
-# 混合检索 (本地轻量级)
-fastembed
-# 工具库
-python-frontmatter
-pydantic
-httpx
-python-dateutil
-cachetools
-```
+- `filename`
+- `date`（`YYYY-MM-DD`）
+- `date_numeric`（`YYYYMMDD` 整数）
+- `doc_hash`
+- `keywords`（逗号拼接）
+- `keyword_list`（数组）
+- `original_text`
+- `scope`（可选）
 
------
+注意：`SourceItem` 模型有 `scope` 字段，但当前 `_node_to_source()` 未显式填充，默认 `null`。
 
-### 5\. 核心代码实现
+## 7. 环境变量（代码中实际读取）
 
-#### `app/utils.py` (日期解析与时间衰减)
+1. 模型与协议
+- `LLM_MODEL`, `OPENAI_API_KEY`, `OPENAI_API_BASE`
+- `EMBEDDING_MODEL`, `EMBEDDING_API_KEY`, `EMBEDDING_API_BASE`, `EMBEDDING_DIM`
+- `RERANK_API_URL`, `RERANK_API_BASE`, `RERANK_API_KEY`, `RERANK_MODEL`, `RERANK_TIMEOUT`, `RERANK_RETURN_DOCUMENTS`
 
-```python
-import re
-import os
-import datetime
-from dateutil import parser
+2. 检索策略
+- `TOP_K_RETRIEVAL`, `TOP_N_RERANK`, `FINAL_TOP_K`, `SPARSE_TOP_K`, `TIME_DECAY_RATE`
 
-def extract_date_from_filename(filename: str) -> str:
-    """多策略提取文件名中的日期，返回 YYYY-MM-DD 或 None"""
-    base_name = os.path.basename(filename)
-    
-    # 策略 1: Unix 时间戳 (10位或13位)
-    # 匹配: 1727395200.md, report_1727395200.md
-    ts_match = re.search(r'(^|[^0-9])(\d{10}|\d{13})([^0-9]|$)', base_name)
-    if ts_match:
-        try:
-            ts = float(ts_match.group(2))
-            if ts > 3000000000: ts /= 1000 # 处理毫秒级
-            return datetime.datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
-        except: pass
+3. 并发/重试/批处理
+- `LLM_CONTEXT_WINDOW`, `LLM_CONCURRENCY`, `LLM_MAX_RETRIES`, `LLM_RETRY_BACKOFF`
+- `EMBEDDING_MAX_RETRIES`, `EMBEDDING_RETRY_BACKOFF`
+- `RERANK_MAX_RETRIES`, `RERANK_RETRY_BACKOFF`
+- `INSERT_BATCH_SIZE`, `INGEST_INSERT_MAX_RETRIES`, `INGEST_INSERT_RETRY_BACKOFF`
+- `QUERY_MAX_RETRIES`, `QUERY_RETRY_BACKOFF`
+- `BATCH_INGEST_CONCURRENCY`, `BATCH_MAX_FILES`
 
-    # 策略 2: 标准日期格式 (YYYY-MM-DD, YYYYMMDD等)
-    date_match = re.search(r'(\d{4})[-./_]?(\d{2})[-./_]?(\d{2})', base_name)
-    if date_match:
-        try:
-            d_str = f"{date_match.group(1)}-{date_match.group(2)}-{date_match.group(3)}"
-            return parser.parse(d_str).strftime("%Y-%m-%d")
-        except: pass
-            
-    return None
+4. Qdrant
+- `QDRANT_HOST`, `QDRANT_PORT`, `QDRANT_HTTPS`, `QDRANT_URL`, `QDRANT_API_KEY`, `QDRANT_CLIENT_TIMEOUT`, `COLLECTION_NAME`
 
-def apply_time_decay(nodes, decay_rate=0.005):
-    """
-    对 Rerank 后的结果进行时间降权
-    公式: NewScore = OldScore / (1 + Rate * DaysDiff)
-    """
-    today = datetime.date.today()
-    for node in nodes:
-        date_str = node.metadata.get("date")
-        if not date_str: continue
-        
-        try:
-            doc_date = datetime.datetime.strptime(date_str, "%Y-%m-%d").date()
-            delta = (today - doc_date).days
-            if delta > 0:
-                # 线性平滑衰减，避免旧文档分数归零
-                decay_factor = 1.0 / (1.0 + decay_rate * delta)
-                if node.score:
-                    node.score *= decay_factor
-        except: pass
-        
-    # 重新排序
-    nodes.sort(key=lambda x: (x.score or 0.0), reverse=True)
-    return nodes
-```
+5. Sparse 模型缓存
+- `FASTEMBED_CACHE_PATH`, `FASTEMBED_SPARSE_MODEL`
 
-#### `app/ingest.py` (ETL 流水线)
+6. 日志
+- `APP_LOG_LEVEL`（优先）
+- `LOG_LEVEL`
 
-核心逻辑：调用一次 LLM 完成摘要、表格转文字、同义词提取。
+7. 时区
+- `APP_TIMEZONE`（应用时区，默认 `Asia/Shanghai`）
+- `TZ`（容器/系统时区，建议与 `APP_TIMEZONE` 一致）
 
-````python
-import os
-import json
-import hashlib
-from typing import List, Dict
-from llama_index.core.schema import TextNode
-from llama_index.llms.openai import OpenAI
-from chonkie import TokenChunker
-from app.utils import extract_date_from_filename
+## 8. 测试现状
 
-# 专用 LLM 实例用于预处理
-extractor_llm = OpenAI(
-    model=os.getenv("LLM_MODEL"),
-    api_key=os.getenv("OPENAI_API_KEY"),
-    api_base=os.getenv("OPENAI_API_BASE"),
-    temperature=0.1
-)
+- `test/test_features_scope.py`：mock 测试（scope 与 LOD 路由行为）。
+- `test/test_offline_ingest.py`：离线批量入库脚本的批次结果处理测试。
+- `test/test_api.py`：真实链路测试（依赖外部模型服务与 Qdrant）。
+- `test/conftest.py`：测试时集合名覆盖为 `pytest_integration_test`。
 
-chunker = TokenChunker(chunk_size=512, chunk_overlap=50)
+## 9. 文档维护约束
 
-async def analyze_document(text: str) -> Dict:
-    """LLM 三合一预处理：摘要、表格叙述化、关键词扩展"""
-    context = text[:4000] # 截取头部避免超长
-    prompt = f"""
-    分析以下金融文档片段(Markdown)。请输出纯JSON格式，包含：
-    1. summary: 50字内核心摘要。
-    2. table_narrative: 将表格中的关键财务数据/增长率转化为自然语言陈述。无表格则留空。
-    3. keywords: 提取5-8个关键实体(包含股票代码、公司别名、行业术语)。
-    
-    文档内容:
-    {context}
-    """
-    try:
-        response = await extractor_llm.acomplete(prompt)
-        content = str(response).strip()
-        # 清洗 Markdown 标记
-        if content.startswith("```"): 
-            content = content.split("\n", 1)[1].rsplit("\n", 1)[0]
-        return json.loads(content)
-    except:
-        return {"summary": "", "table_narrative": "", "keywords": []}
+修改以下内容时必须同步更新 `README.md` + 本文件：
 
-async def process_file(filename: str, content: str) -> List[TextNode]:
-    # 1. 提取时间
-    meta_date = extract_date_from_filename(filename) or "1970-01-01"
-    
-    # 2. LLM 智能分析 (高价值步骤)
-    analysis = await analyze_document(content)
-    
-    # 3. 构造注入头部 (Rich Context Header)
-    # 这个 header 会被拼接到每个切片前，参与 Embedding
-    keywords_str = ",".join(analysis.get('keywords', []))
-    header_text = (
-        f"Date: {meta_date}\n"
-        f"Summary: {analysis.get('summary', '')}\n"
-        f"Key Data: {analysis.get('table_narrative', '')}\n"
-        f"Tags: {keywords_str}\n"
-        f"---\n"
-    )
-    
-    # 4. 极速切分
-    chunks = chunker(content)
-    nodes = []
-    
-    for i, chunk in enumerate(chunks):
-        # 拼接 Header
-        full_text = f"{header_text}{chunk.text}"
-        
-        node = TextNode(
-            text=full_text,
-            metadata={
-                "filename": filename,
-                "date": meta_date,
-                "keywords": keywords_str,
-                # 保留原始纯净文本供展示
-                "original_text": chunk.text
-            }
-        )
-        # 5. 幂等性 ID (防止重复入库)
-        node.id_ = hashlib.md5(f"{filename}_{i}".encode()).hexdigest()
-        nodes.append(node)
-        
-    return nodes
-````
+1. API 路由签名/字段变更。
+2. metadata 字段增删。
+3. 环境变量新增、默认值变更、重试策略变更。
+4. Docker 启动方式、端口映射、镜像名变更。
+5. 脚本 CLI 参数变更。
 
-#### `app/core.py` (引擎构建)
+## 10. 典型改动检查清单
 
-集成自定义 API Rerank 和 Qdrant 混合检索。
-
-```python
-import os
-import httpx
-from typing import List, Optional
-from llama_index.core import VectorStoreIndex, StorageContext, Settings, QueryBundle
-from llama_index.core.schema import NodeWithScore
-from llama_index.core.postprocessor.types import BaseNodePostprocessor
-from llama_index.vector_stores.qdrant import QdrantVectorStore
-from llama_index.llms.openai import OpenAI
-from llama_index.embeddings.openai import OpenAIEmbedding
-from llama_index.core.vector_stores import MetadataFilters, MetadataFilter, FilterOperator
-from qdrant_client import QdrantClient
-
-# 全局配置
-Settings.llm = OpenAI(model=os.getenv("LLM_MODEL"), temperature=0.1)
-Settings.embed_model = OpenAIEmbedding(model=os.getenv("EMBEDDING_MODEL"))
-
-# --- 自定义通用 Rerank 类 ---
-class APIReranker(BaseNodePostprocessor):
-    def __init__(self, top_n: int = 10):
-        super().__init__()
-        self.top_n = top_n
-        self.api_url = os.getenv("RERANK_API_URL")
-        self.api_key = os.getenv("RERANK_API_KEY")
-        self.model = os.getenv("RERANK_MODEL")
-
-    def _postprocess_nodes(self, nodes: List[NodeWithScore], query_bundle: Optional[QueryBundle] = None) -> List[NodeWithScore]:
-        if not nodes: return []
-        try:
-            payload = {
-                "model": self.model,
-                "query": query_bundle.query_str,
-                "documents": [n.node.get_content() for n in nodes],
-                "top_n": self.top_n,
-                "return_documents": False
-            }
-            headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
-            
-            with httpx.Client(timeout=10.0) as client:
-                resp = client.post(self.api_url, json=payload, headers=headers)
-                resp.raise_for_status()
-                # 适配常见 API 返回格式 (results 或 data)
-                data = resp.json()
-                results = data.get("results", data.get("data", []))
-                
-                new_nodes = []
-                for res in results:
-                    idx = res.get("index")
-                    score = res.get("relevance_score", res.get("score"))
-                    if idx is not None:
-                        node = nodes[idx]
-                        node.score = float(score) # 更新为 Rerank 分数
-                        new_nodes.append(node)
-                
-                new_nodes.sort(key=lambda x: x.score, reverse=True)
-                return new_nodes
-        except Exception as e:
-            print(f"Rerank Failed: {e}, returning original")
-            return nodes[:self.top_n]
-
-# --- Qdrant 初始化 (混合检索) ---
-client = QdrantClient(host=os.getenv("QDRANT_HOST"), port=int(os.getenv("QDRANT_PORT")))
-vector_store = QdrantVectorStore(
-    client=client, 
-    collection_name=os.getenv("COLLECTION_NAME"),
-    enable_hybrid=True, # 开启 Dense + Sparse
-    # 使用支持中文的多语言模型 BM42
-    fastembed_sparse_model="Qdrant/bm42-all-minilm-l6-v2-attentions"
-)
-storage_context = StorageContext.from_defaults(vector_store=vector_store)
-
-def insert_nodes(nodes):
-    VectorStoreIndex.from_vector_store(vector_store, storage_context=storage_context).insert_nodes(nodes)
-
-def get_query_engine(start_date=None, end_date=None):
-    # 1. 构造时间过滤器
-    filters_list = []
-    if start_date: filters_list.append(MetadataFilter(key="date", value=start_date, operator=FilterOperator.GTE))
-    if end_date: filters_list.append(MetadataFilter(key="date", value=end_date, operator=FilterOperator.LTE))
-    filters = MetadataFilters(filters=filters_list) if filters_list else None
-
-    index = VectorStoreIndex.from_vector_store(vector_store, storage_context=storage_context)
-    
-    # 2. 返回引擎: 混合检索(alpha=0.5) -> Top 100 -> Filter -> Rerank(Top 20)
-    return index.as_query_engine(
-        similarity_top_k=int(os.getenv("TOP_K_RETRIEVAL", 100)),
-        vector_store_kwargs={"query_mode": "hybrid", "hybrid_fusion_weight": 0.5},
-        filters=filters,
-        node_postprocessors=[APIReranker(top_n=int(os.getenv("TOP_N_RERANK", 20)))]
-    )
-```
-
-#### `app/main.py` (入口与缓存)
-
-```python
-import os
-import hashlib
-from fastapi import FastAPI, UploadFile, File, HTTPException
-from pydantic import BaseModel
-from cachetools import TTLCache
-from typing import Optional, List
-from app.ingest import process_file
-from app.core import insert_nodes, get_query_engine
-from app.utils import apply_time_decay
-
-app = FastAPI(title="Finance RAG Engine")
-
-# 本地 LRU 缓存: 容量 1000, 有效期 1 小时
-CACHE = TTLCache(maxsize=1000, ttl=3600)
-
-class ChatRequest(BaseModel):
-    query: str
-    start_date: Optional[str] = None
-    end_date: Optional[str] = None
-
-@app.post("/ingest")
-async def ingest_api(file: UploadFile = File(...)):
-    if not file.filename.endswith(".md"):
-        raise HTTPException(400, "Only .md supported")
-    content = (await file.read()).decode("utf-8")
-    nodes = await process_file(file.filename, content)
-    if nodes: insert_nodes(nodes)
-    return {"status": "ok", "chunks": len(nodes), "filename": file.filename}
-
-@app.post("/chat")
-async def chat_api(req: ChatRequest):
-    # 1. 检查缓存
-    cache_key = hashlib.md5(f"{req.query}_{req.start_date}_{req.end_date}".encode()).hexdigest()
-    if cache_key in CACHE:
-        return CACHE[cache_key]
-
-    try:
-        # 2. 执行查询 (Retrieval + Rerank)
-        engine = get_query_engine(req.start_date, req.end_date)
-        response = engine.query(req.query)
-        
-        # 3. 应用层时间衰减
-        decay_rate = float(os.getenv("TIME_DECAY_RATE", 0.005))
-        final_nodes = apply_time_decay(response.source_nodes, decay_rate=decay_rate)
-        
-        # 4. 截取最终 Top-K
-        final_k = int(os.getenv("FINAL_TOP_K", 10))
-        result_nodes = final_nodes[:final_k]
-        
-        # 5. 构造输出
-        result = {
-            "answer": str(response), # 包含 LLM 生成的回答
-            "sources": [{
-                "filename": n.metadata["filename"],
-                "date": n.metadata["date"],
-                "score": round(n.score, 4),
-                "keywords": n.metadata.get("keywords"),
-                "text": n.metadata.get("original_text", n.text)[:200]
-            } for n in result_nodes]
-        }
-        
-        # 6. 写入缓存
-        CACHE[cache_key] = result
-        return result
-        
-    except Exception as e:
-        raise HTTPException(500, str(e))
-```
-
-> 说明：入库接口仅接受 Markdown (`.md`) 文件。这是因为在数据爬取阶段已经完成统一的 Markdown 化预处理，可以极大减轻 API 这一层的解析负担，是“重预处理、轻运行时”策略下的取舍。如果上传 PDF、TXT 等格式会直接返回 400，需在入库前完成 Markdown 转换。
-
------
-
-### 6\. 部署配置
-
-#### `Dockerfile`
-
-```dockerfile
-FROM python:3.10-slim
-
-WORKDIR /app
-
-# 安装系统依赖 (如有需要)
-RUN apt-get update && apt-get install -y --no-install-recommends gcc && rm -rf /var/lib/apt/lists/*
-
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-COPY . .
-
-EXPOSE 8000
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
-```
-
-#### `docker-compose.yml`
-
-**关键点**：`QDRANT__STORAGE__OPTIMIZERS__DELETED_THRESHOLD` 和 volume 挂载确保了硬盘索引的性能和持久化。
-
-```yaml
-services:
-  qdrant:
-    image: qdrant/qdrant:latest
-    container_name: rag_qdrant
-    ports:
-      - "6333:6333"
-    volumes:
-      - ./qdrant_data:/qdrant/storage
-    environment:
-      # 优化配置：更激进地释放内存，依赖磁盘
-      - QDRANT__STORAGE__OPTIMIZERS__DELETED_THRESHOLD=0.5
-    restart: always
-
-  api:
-    build: .
-    container_name: rag_api
-    ports:
-      - "8000:8000"
-    volumes:
-      - ./app:/app  # 开发模式挂载源码
-    env_file: .env
-    depends_on:
-      - qdrant
-    restart: always
-```
-
------
-
-### 7\. 使用指南
-
-1.  **启动**: `docker-compose up -d --build`
-2.  **入库 (Ingest)**:
-      * 该步骤会触发 LLM 进行三合一预处理，速度稍慢但价值高。
-      * 目前只接受 Markdown (`.md`) 文件，原因是爬虫阶段已经统一做过 Markdown 化处理，可大幅降低线上 CPU/GPU 占用；如需导入其它格式，请先完成离线转换。
-      * `curl -X POST "http://localhost:8000/ingest" -F "file=@./data/20251001_NVIDIA_Report.md"`
-      * 支持批量上传：`curl -X POST "http://localhost:8000/ingest/batch" -F "files=@a.md" -F "files=@b.md"`
-3.  **查询 (Chat)**:
-      * `curl -X POST "http://localhost:8000/chat" -H "Content-Type: application/json" -d '{"query": "英伟达最新财报表现", "start_date": "2025-01-01"}'`
-      * 响应结构示例：
-        ```json
-        {
-          "answer": "...",
-          "sources": [
-            {"filename": "20250228_NVIDIA_Report.md", "date": "2025-02-28", "score": 0.8431, "keywords": "NVDA,英伟达,GPU", "text": "......"}
-          ]
-        }
-        ```
-
-### 方案总结
-
-  * **极简且强壮**: 没有复杂的 Vector DB 集群维护，单机 Qdrant + 硬盘索引抗住百万数据。
-  * **智能**: 所有的“脏活累活”（表格、同义词、摘要）在入库时由 LLM 一次性干完，查询时享受高质量元数据的红利。
-  * **兼容性**: 无论文件名怎么乱，多策略解析器都能兜底；无论 API 是 OpenAI 还是 DeepSeek，都能无缝接入。
-  * **可控**: 时间衰减和缓存都在 Python 层控制，逻辑透明，易于调试参数。
+1. 改检索链路：确认 `/chat` 与 `/chat/lod` 行为一致性。
+2. 改入库链路：确认 `force_update`、`doc_hash` 去重、缓存清理未回归。
+3. 改过滤逻辑：补 `keywords_any/all`、`scope` 相关测试。
+4. 改配置项：补 `.env.example` 与 README 对应说明。

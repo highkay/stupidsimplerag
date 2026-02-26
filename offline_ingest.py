@@ -100,7 +100,7 @@ def ingest_batch(
     paths: List[Path],
     timeout: Optional[float],
     max_retries: int = 3,
-) -> Tuple[bool, str]:
+) -> Tuple[bool, str, List[Path], List[str]]:
     """批量上传文件，支持自动重试"""
     files: List[Tuple[str, Tuple[Any, ...]]] = []
     for path in paths:
@@ -118,15 +118,29 @@ def ingest_batch(
     
     # 重试逻辑
     last_error = ""
+    last_success_paths: List[Path] = []
+    last_item_errors: List[str] = []
     for attempt in range(max_retries):
         try:
             resp = client.post(url, files=files, timeout=timeout)
             if resp.status_code == 200:
-                return True, resp.text
+                success_paths, item_errors = _parse_batch_response(resp.text, paths)
+                last_success_paths = success_paths
+                last_item_errors = item_errors
+                if success_paths and not item_errors:
+                    return True, resp.text, success_paths, item_errors
+                if success_paths:
+                    return True, resp.text, success_paths, item_errors
+                last_error = (
+                    "; ".join(item_errors)
+                    if item_errors
+                    else "batch response contains no successful items"
+                )
+                return False, last_error, [], item_errors
             last_error = resp.text
             # 非超时错误不重试
             if resp.status_code != 408:  # 408 Request Timeout
-                return False, last_error
+                return False, last_error, [], []
         except (httpx.ReadTimeout, httpx.ConnectTimeout) as e:
             last_error = f"超时错误: {e}"
             if attempt < max_retries - 1:
@@ -140,7 +154,45 @@ def ingest_batch(
             logger.error("批次上传出错: %s", e)
             break
     
-    return False, last_error
+    return False, last_error, last_success_paths, last_item_errors
+
+
+def _parse_batch_response(raw_text: str, paths: List[Path]) -> Tuple[List[Path], List[str]]:
+    """Parse /ingest/batch response and return per-file successes/errors."""
+    try:
+        payload = json.loads(raw_text)
+    except Exception as exc:
+        return [], [f"invalid batch response JSON: {exc}"]
+
+    if not isinstance(payload, list):
+        return [], [f"invalid batch response type: {type(payload).__name__}"]
+
+    success_paths: List[Path] = []
+    item_errors: List[str] = []
+
+    for idx, path in enumerate(paths):
+        if idx >= len(payload):
+            item_errors.append(f"{path.name}: missing response item")
+            continue
+
+        item = payload[idx]
+        if not isinstance(item, dict):
+            item_errors.append(f"{path.name}: invalid response item type {type(item).__name__}")
+            continue
+
+        status = str(item.get("status", "")).strip().lower()
+        filename = str(item.get("filename") or path.name)
+        if status in {"ok", "skipped"}:
+            success_paths.append(path)
+            continue
+
+        detail = item.get("error") or f"status={status or 'unknown'}"
+        item_errors.append(f"{filename}: {detail}")
+
+    if len(payload) > len(paths):
+        item_errors.append(f"extra response items: {len(payload) - len(paths)}")
+
+    return success_paths, item_errors
 
 
 def main() -> None:
@@ -259,20 +311,26 @@ def main() -> None:
         else:
             # 批量模式
             for chunk in chunked(files, args.batch_size):
-                ok, message = ingest_batch(
+                ok, message, success_paths, item_errors = ingest_batch(
                     client, ingest_batch_url, chunk, timeout, args.max_retries
                 )
                 if ok:
-                    success += len(chunk)
-                    logger.info("Ingested batch (%d files)", len(chunk))
-                    # 记录成功的批次
-                    for path in chunk:
+                    success += len(success_paths)
+                    logger.info(
+                        "Ingested batch: success=%d/%d",
+                        len(success_paths),
+                        len(chunk),
+                    )
+                    for path in success_paths:
                         completed_files.add(str(path.absolute()))
-                    if args.skip_completed:
+                    if args.skip_completed and success_paths:
                         save_progress(progress_file, completed_files)
+                    if item_errors:
+                        logger.warning("Batch had item-level failures: %s", "; ".join(item_errors))
                 else:
                     names = ", ".join(p.name for p in chunk)
-                    logger.error("Failed batch [%s]: %s", names, message)
+                    error_suffix = f" | item_errors={'; '.join(item_errors)}" if item_errors else ""
+                    logger.error("Failed batch [%s]: %s%s", names, message, error_suffix)
 
     logger.info("Finished ingest: %d/%d files succeeded", success, total)
     if args.skip_completed:

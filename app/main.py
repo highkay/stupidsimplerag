@@ -23,7 +23,6 @@ from app.core import (
     insert_nodes,
     delete_nodes_by_filename,
     list_all_documents,
-    check_filename_exists,
     perform_hierarchical_search,
 )
 from app.ingest import compute_doc_hash, process_file
@@ -35,6 +34,7 @@ from app.models import (
     TextIngestRequest,
     DocumentInfo,
 )
+from app.time_utils import APP_TIMEZONE, datetime_from_epoch, now_in_app_tz
 from app.utils import get_node_metadata
 
 app = FastAPI(title="Finance RAG Engine")
@@ -66,6 +66,11 @@ def _log_query_retry(retry_state: RetryCallState) -> None:
     )
 
 
+def _clear_query_cache(reason: str) -> None:
+    CACHE.clear()
+    logger.debug("Cleared global query cache: %s", reason)
+
+
 def _cache_key(body: ChatRequest) -> str:
     parts = [
         body.query,
@@ -93,10 +98,10 @@ def _parse_epoch_date(raw: str) -> Optional[str]:
         ts = float(raw)
     except (TypeError, ValueError):
         return None
-    if ts > 3_000_000_000_000:  # handle ms timestamps
+    if ts >= 100_000_000_000:  # handle ms timestamps
         ts /= 1000.0
     try:
-        dt = datetime.datetime.utcfromtimestamp(ts)
+        dt = datetime_from_epoch(ts)
     except (OverflowError, OSError, ValueError):
         return None
     return dt.date().isoformat()
@@ -115,6 +120,10 @@ def _parse_iso_date(raw: str) -> Optional[str]:
         dt = datetime.datetime.fromisoformat(text)
     except ValueError:
         return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=APP_TIMEZONE)
+    else:
+        dt = dt.astimezone(APP_TIMEZONE)
     return dt.date().isoformat()
 
 
@@ -206,21 +215,8 @@ def _node_to_source(node) -> SourceItem:
         score=round(node.score, 4) if node.score is not None else None,
         keywords=metadata.get("keywords"),
         text=text[:200],
+        scope=metadata.get("scope"),
     )
-
-
-def _node_keyword_set(node) -> set[str]:
-    metadata = get_node_metadata(node)
-    keywords = []
-    raw_list = metadata.get("keyword_list")
-    if isinstance(raw_list, list):
-        keywords.extend(raw_list)
-    elif isinstance(raw_list, str):
-        keywords.extend(item.strip() for item in raw_list.split(","))
-    raw_str = metadata.get("keywords")
-    if isinstance(raw_str, str):
-        keywords.extend(item.strip() for item in raw_str.split(","))
-    return {kw.lower() for kw in keywords if kw and kw.strip()}
 
 
 def _generate_answer_from_nodes(nodes: List, limit: int = 3) -> str:
@@ -266,9 +262,8 @@ async def _process_and_insert_content(
     if force_update:
         logger.info("Force update enabled: deleting existing nodes for filename=%s", filename)
         await delete_nodes_by_filename(filename)
-        # We also need to clear CACHE because the knowledge base has changed
-        CACHE.clear()
-        logger.debug("Cleared global query cache due to document update")
+        # Clear cache immediately because a document rewrite is in progress.
+        _clear_query_cache(f"force_update delete filename={filename}")
 
     start = time.perf_counter()
     nodes = await process_file(
@@ -389,6 +384,8 @@ async def ingest_api(
         status,
         len(nodes),
     )
+    if status == "ok":
+        _clear_query_cache(f"ingest file={file.filename}")
     return IngestResponse(
         status=status, chunks=len(nodes), filename=file.filename, doc_hash=doc_hash, scope=scope
     )
@@ -472,6 +469,8 @@ async def ingest_batch(
     success_count = sum(
         1 for item in responses if item and item.status and item.status.lower() == "ok"
     )
+    if success_count > 0:
+        _clear_query_cache(f"ingest_batch success_count={success_count}")
     logger.info(
         "Batch ingest finished total_files=%d succeeded=%d failed=%d",
         len(responses),
@@ -504,11 +503,11 @@ async def ingest_text_api(request: Request, body: TextIngestRequest) -> IngestRe
             )
     
     # 如果 header 中没有日期或解析失败，使用当前时间
+    now = now_in_app_tz()
     if not ingest_date:
-        now = datetime.datetime.utcnow()
         ingest_date = now.strftime("%Y-%m-%d")
-    
-    filename = body.filename or f"inline_{datetime.datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.md"
+
+    filename = body.filename or f"inline_{now.strftime('%Y%m%d_%H%M%S')}.md"
     logger.info("Text ingest filename=%s date=%s force_update=%s scope=%s", filename, ingest_date, body.force_update, body.scope)
     logger.debug(
         "Text ingest filename=%s raw_len=%d stripped_len=%d",
@@ -526,6 +525,8 @@ async def ingest_text_api(request: Request, body: TextIngestRequest) -> IngestRe
         status,
         len(nodes),
     )
+    if status == "ok":
+        _clear_query_cache(f"ingest_text filename={filename}")
     return IngestResponse(
         status=status, chunks=len(nodes), filename=filename, doc_hash=doc_hash, scope=body.scope
     )
@@ -606,7 +607,7 @@ async def chat_api(req: ChatRequest) -> ChatResponse:
 
     result_payload: Dict = {
         "answer": response_answer,
-        "sources": [_node_to_source(node).dict() for node in result_nodes],
+        "sources": [_node_to_source(node).model_dump() for node in result_nodes],
     }
     CACHE[key] = result_payload
     top_filenames = [item["filename"] for item in result_payload["sources"]]
@@ -638,6 +639,8 @@ async def chat_lod_api(req: ChatRequest) -> ChatResponse:
             scope=req.scope,
             start_date=req.start_date,
             end_date=req.end_date,
+            filename=req.filename,
+            filename_contains=req.filename_contains,
             keywords_any=req.keywords_any,
             keywords_all=req.keywords_all,
         )
@@ -656,7 +659,7 @@ async def chat_lod_api(req: ChatRequest) -> ChatResponse:
 
     result_payload: Dict = {
         "answer": response_answer,
-        "sources": [_node_to_source(node).dict() for node in result_nodes],
+        "sources": [_node_to_source(node).model_dump() for node in result_nodes],
     }
     return ChatResponse(**result_payload)
 
@@ -684,8 +687,9 @@ async def list_documents_ui(request: Request) -> HTMLResponse:
     """UI fragment for listing documents (HTMX)."""
     docs = await list_all_documents()
     return templates.TemplateResponse(
-        "partials/document_list.html", 
-        {"request": request, "documents": docs}
+        request,
+        "partials/document_list.html",
+        {"documents": docs},
     )
 
 
@@ -697,8 +701,9 @@ async def delete_document_ui(request: Request, filename: str) -> HTMLResponse:
     # After deletion, return the updated list fragment
     docs = await list_all_documents()
     return templates.TemplateResponse(
-        "partials/document_list.html", 
-        {"request": request, "documents": docs}
+        request,
+        "partials/document_list.html",
+        {"documents": docs},
     )
 
 
@@ -721,27 +726,26 @@ async def dashboard_page(request: Request) -> HTMLResponse:
         "batch_concurrency": BATCH_INGEST_CONCURRENCY,
     }
     context = {
-        "request": request,
         "metrics": metrics,
         "cache_stats": cache_stats,
         "config": config_snapshot,
     }
-    return templates.TemplateResponse("dashboard.html", context)
+    return templates.TemplateResponse(request, "dashboard.html", context)
 
 
 @app.get("/ui/upload", response_class=HTMLResponse)
 async def upload_page(request: Request) -> HTMLResponse:
-    return templates.TemplateResponse("upload_single.html", {"request": request})
+    return templates.TemplateResponse(request, "upload_single.html")
 
 
 @app.get("/ui/upload/batch", response_class=HTMLResponse)
 async def upload_batch_page(request: Request) -> HTMLResponse:
-    return templates.TemplateResponse("upload_batch.html", {"request": request})
+    return templates.TemplateResponse(request, "upload_batch.html")
 
 
 @app.get("/ui/chat", response_class=HTMLResponse)
 async def chat_page(request: Request) -> HTMLResponse:
-    return templates.TemplateResponse("chat.html", {"request": request})
+    return templates.TemplateResponse(request, "chat.html")
 
 
 @app.post("/ui/ingest", response_class=HTMLResponse)
@@ -752,16 +756,16 @@ async def upload_via_ui(
 ) -> HTMLResponse:
     is_htmx = _is_htmx(request)
     template_name = "partials/upload_result.html" if is_htmx else "upload_single.html"
-    context = {"request": request}
+    context = {}
     try:
         force_val = _parse_bool(force_update)
         result = await ingest_api(file, force_update=force_val)
-        context["result"] = result.dict()
+        context["result"] = result.model_dump()
     except HTTPException as exc:
         context["error"] = exc.detail
     except Exception as exc:
         context["error"] = str(exc)
-    return templates.TemplateResponse(template_name, context)
+    return templates.TemplateResponse(request, template_name, context)
 
 
 @app.post("/ui/ingest/batch", response_class=HTMLResponse)
@@ -772,16 +776,16 @@ async def upload_batch_via_ui(
 ) -> HTMLResponse:
     is_htmx = _is_htmx(request)
     template_name = "partials/batch_result.html" if is_htmx else "upload_batch.html"
-    context = {"request": request}
+    context = {}
     try:
         force_val = _parse_bool(force_update)
         results = await ingest_batch(files, force_update=force_val)
-        context["results"] = [item.dict() for item in results]
+        context["results"] = [item.model_dump() for item in results]
     except HTTPException as exc:
         context["error"] = exc.detail
     except Exception as exc:
         context["error"] = str(exc)
-    return templates.TemplateResponse(template_name, context)
+    return templates.TemplateResponse(request, template_name, context)
 
 
 @app.post("/ui/chat/query", response_class=HTMLResponse)
@@ -812,12 +816,12 @@ async def chat_via_ui(
     )
     is_htmx = _is_htmx(request)
     template_name = "partials/chat_result.html" if is_htmx else "chat.html"
-    context = {"request": request}
+    context = {}
     try:
         result = await chat_api(req_body)
-        context["result"] = result.dict()
+        context["result"] = result.model_dump()
     except HTTPException as exc:
         context["error"] = exc.detail
     except Exception as exc:
         context["error"] = str(exc)
-    return templates.TemplateResponse(template_name, context)
+    return templates.TemplateResponse(request, template_name, context)

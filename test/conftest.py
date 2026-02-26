@@ -1,10 +1,15 @@
 import os
+import sys
+from pathlib import Path
+
 import pytest
-import asyncio
-from typing import AsyncGenerator
 from fastapi.testclient import TestClient
-from httpx import AsyncClient, ASGITransport
 from dotenv import load_dotenv
+
+# Ensure `pytest -q` (entrypoint script) can always import local `app` package.
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 # 1. 纯净加载 .env，不做任何 Qdrant Host 的硬编码干扰
 load_dotenv(override=True)
@@ -12,22 +17,8 @@ load_dotenv(override=True)
 # 2. 仅修改集合名称，防止污染正式数据
 os.environ["COLLECTION_NAME"] = "pytest_integration_test"
 
-from app.main import app
-
-@pytest.fixture(scope="session")
-def event_loop():
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-    yield loop
-    loop.close()
-
 @pytest.fixture
 def client():
-    return TestClient(app)
+    from app.main import app
 
-@pytest.fixture
-async def async_client() -> AsyncGenerator:
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
-        yield ac
+    return TestClient(app)
