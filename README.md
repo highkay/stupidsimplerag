@@ -102,6 +102,9 @@ uvicorn app.main:app --reload
 - `skip_rerank`（跳过重排）
 - `skip_generation`（仅返回切片，不调用生成）
 
+`/chat` 与 `/chat/lod` 的响应 `sources[]` 会返回 `filename/date/score/keywords/text/scope`，
+其中 `scope` 从切片 metadata 透传；无该字段时为 `null`。
+
 示例：
 
 ```bash

@@ -149,6 +149,38 @@ def test_chat_source_includes_scope(client):
     assert source["scope"] == "reports/2026"
 
 
+def test_chat_lod_source_includes_scope(client):
+    class FakeResponse:
+        def __init__(self):
+            self.source_nodes = [
+                NodeWithScore(
+                    node=TextNode(
+                        text="lod example text",
+                        metadata={
+                            "filename": "lod_scope_test.md",
+                            "date": "2026-01-02",
+                            "keywords": "k2",
+                            "original_text": "lod example text",
+                            "scope": "reports/lod/2026",
+                        },
+                    ),
+                    score=0.77,
+                )
+            ]
+
+        def __str__(self):
+            return "lod answer"
+
+    with patch(
+        "app.main.perform_hierarchical_search",
+        new=AsyncMock(return_value=FakeResponse()),
+    ):
+        response = client.post("/chat/lod", json={"query": "lod scope?"})
+    assert response.status_code == 200
+    source = response.json()["sources"][0]
+    assert source["scope"] == "reports/lod/2026"
+
+
 def test_chat_cache_cleared_after_successful_ingest(client):
     call_count = {"n": 0}
 

@@ -142,7 +142,8 @@
 - `original_text`
 - `scope`（可选）
 
-注意：`SourceItem` 模型有 `scope` 字段，但当前 `_node_to_source()` 未显式填充，默认 `null`。
+补充：`_node_to_source()` 会从节点 metadata 显式回填 `scope` 到 `SourceItem.scope`；
+若节点无该字段则返回 `null`。
 
 ## 7. 环境变量（代码中实际读取）
 
