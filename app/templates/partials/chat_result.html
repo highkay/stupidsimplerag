@@ -31,6 +31,7 @@
                 </div>
                 <div class="text-sm text-base-content/60 mt-1">
                     日期: {{ src.date or "未知" }}
+                    {% if src.scope %} · Scope: {{ src.scope }}{% endif %}
                 </div>
                 <div class="mt-2 text-sm">{{ src.text }}</div>
                 <div class="mt-2 flex flex-wrap gap-2">

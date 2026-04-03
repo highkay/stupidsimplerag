@@ -57,6 +57,7 @@ class DocumentInfo(BaseModel):
     filename: str
     date: Optional[str] = None
     chunks: int
+    scope: Optional[str] = None
 
 
 class TextIngestRequest(BaseModel):

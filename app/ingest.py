@@ -237,7 +237,9 @@ async def process_file(
             text=full_text,
             metadata=node_metadata,
         )
-        hash_base = doc_hash or filename
+        # Scope is part of the document identity: identical content can coexist
+        # across different namespaces without colliding on node IDs.
+        hash_base = f"{doc_hash or filename}|{scope or ''}"
         node.id_ = hashlib.md5(f"{hash_base}_{idx}".encode()).hexdigest()
         nodes.append(node)
     if nodes:

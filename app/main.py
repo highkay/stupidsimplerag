@@ -4,11 +4,12 @@ import hashlib
 import logging
 import os
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Dict, List, Optional
 
 from cachetools import TTLCache
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -24,6 +25,7 @@ from app.core import (
     delete_nodes_by_filename,
     list_all_documents,
     perform_hierarchical_search,
+    shutdown_resources,
 )
 from app.ingest import compute_doc_hash, process_file
 from app.models import (
@@ -37,7 +39,17 @@ from app.models import (
 from app.time_utils import APP_TIMEZONE, datetime_from_epoch, now_in_app_tz
 from app.utils import get_node_metadata
 
-app = FastAPI(title="Finance RAG Engine")
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    try:
+        yield
+    finally:
+        CACHE.clear()
+        await shutdown_resources()
+
+
+app = FastAPI(title="Finance RAG Engine", lifespan=lifespan)
 CACHE = TTLCache(maxsize=1000, ttl=3600)
 BASE_DIR = Path(__file__).resolve().parent
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
@@ -87,10 +99,12 @@ def _cache_key(body: ChatRequest) -> str:
     raw = "|".join(parts)
     return hashlib.md5(raw.encode()).hexdigest()
 
-# ... (rest of imports/helpers unchanged)
 
-# Need to target the Chat API block now
-# I will skip to the chat_api replace
+def _normalize_scope(raw: Optional[str]) -> Optional[str]:
+    if raw is None:
+        return None
+    value = str(raw).strip()
+    return value or None
 
 
 def _parse_epoch_date(raw: str) -> Optional[str]:
@@ -215,7 +229,7 @@ def _node_to_source(node) -> SourceItem:
         score=round(node.score, 4) if node.score is not None else None,
         keywords=metadata.get("keywords"),
         text=text[:200],
-        scope=metadata.get("scope"),
+        scope=_normalize_scope(metadata.get("scope")),
     )
 
 
@@ -238,6 +252,7 @@ async def _process_and_insert_content(
     """
     Shared helper to run expensive processing & DB insert without blocking the event loop.
     """
+    scope = _normalize_scope(scope)
     content_len = len(content)
     doc_hash = compute_doc_hash(content)
     logger.debug(
@@ -253,17 +268,24 @@ async def _process_and_insert_content(
     # Check if content exists (hash-based deduplication)
     # If we are NOT forcing an update, we can skip if hash exists.
     # If we ARE forcing an update, we should delete old nodes for this filename even if hash is same.
-    if not force_update and await adoc_exists(doc_hash):
+    if not force_update and await adoc_exists(doc_hash, scope=scope):
         logger.info(
-            "Skipping ingest for file=%s doc_hash=%s (already exists)", filename, doc_hash
+            "Skipping ingest for file=%s doc_hash=%s scope=%s (already exists)",
+            filename,
+            doc_hash,
+            scope,
         )
         return [], True, doc_hash
 
     if force_update:
-        logger.info("Force update enabled: deleting existing nodes for filename=%s", filename)
-        await delete_nodes_by_filename(filename)
+        logger.info(
+            "Force update enabled: deleting existing nodes for filename=%s scope=%s",
+            filename,
+            scope,
+        )
+        await delete_nodes_by_filename(filename, scope=scope)
         # Clear cache immediately because a document rewrite is in progress.
-        _clear_query_cache(f"force_update delete filename={filename}")
+        _clear_query_cache(f"force_update delete filename={filename} scope={scope}")
 
     start = time.perf_counter()
     nodes = await process_file(
@@ -365,6 +387,7 @@ async def ingest_api(
     force_update: bool = Form(False),
     scope: Optional[str] = Form(None)
 ) -> IngestResponse:
+    scope = _normalize_scope(scope)
     if not (file.filename.endswith(".md") or file.filename.endswith(".txt")):
         raise HTTPException(status_code=400, detail="Only .md or .txt supported")
 
@@ -397,6 +420,7 @@ async def ingest_batch(
     force_update: bool = Form(False),
     scope: Optional[str] = Form(None)
 ) -> List[IngestResponse]:
+    scope = _normalize_scope(scope)
     if not files:
         raise HTTPException(status_code=400, detail="At least one file is required")
     if len(files) > MAX_BATCH_FILES:
@@ -508,7 +532,8 @@ async def ingest_text_api(request: Request, body: TextIngestRequest) -> IngestRe
         ingest_date = now.strftime("%Y-%m-%d")
 
     filename = body.filename or f"inline_{now.strftime('%Y%m%d_%H%M%S')}.md"
-    logger.info("Text ingest filename=%s date=%s force_update=%s scope=%s", filename, ingest_date, body.force_update, body.scope)
+    scope = _normalize_scope(body.scope)
+    logger.info("Text ingest filename=%s date=%s force_update=%s scope=%s", filename, ingest_date, body.force_update, scope)
     logger.debug(
         "Text ingest filename=%s raw_len=%d stripped_len=%d",
         filename,
@@ -516,7 +541,7 @@ async def ingest_text_api(request: Request, body: TextIngestRequest) -> IngestRe
         len(content),
     )
     nodes, skipped, doc_hash = await _process_and_insert_content(
-        filename, content, ingest_date, force_update=body.force_update, scope=body.scope
+        filename, content, ingest_date, force_update=body.force_update, scope=scope
     )
     status = "skipped" if skipped else "ok"
     logger.info(
@@ -528,7 +553,7 @@ async def ingest_text_api(request: Request, body: TextIngestRequest) -> IngestRe
     if status == "ok":
         _clear_query_cache(f"ingest_text filename={filename}")
     return IngestResponse(
-        status=status, chunks=len(nodes), filename=filename, doc_hash=doc_hash, scope=body.scope
+        status=status, chunks=len(nodes), filename=filename, doc_hash=doc_hash, scope=scope
     )
 
 
@@ -672,14 +697,16 @@ async def list_documents_api() -> List[DocumentInfo]:
 
 
 @app.delete("/documents/{filename}")
-async def delete_document_api(filename: str):
+async def delete_document_api(filename: str, scope: Optional[str] = Query(None)):
     """API to delete a document by filename."""
-    success = await delete_nodes_by_filename(filename)
+    scope = _normalize_scope(scope)
+    success = await delete_nodes_by_filename(filename, scope=scope)
     if not success:
-        raise HTTPException(status_code=500, detail=f"Failed to delete {filename}")
+        target = f"{filename} (scope={scope})" if scope else f"{filename} (unscoped)"
+        raise HTTPException(status_code=404, detail=f"Document not found: {target}")
     # Clear cache since the data has changed
     CACHE.clear()
-    return {"status": "ok", "filename": filename}
+    return {"status": "ok", "filename": filename, "scope": scope}
 
 
 @app.get("/ui/documents", response_class=HTMLResponse)
@@ -694,9 +721,15 @@ async def list_documents_ui(request: Request) -> HTMLResponse:
 
 
 @app.delete("/ui/documents/{filename}", response_class=HTMLResponse)
-async def delete_document_ui(request: Request, filename: str) -> HTMLResponse:
+async def delete_document_ui(
+    request: Request, filename: str, scope: Optional[str] = Query(None)
+) -> HTMLResponse:
     """HTMX endpoint to delete a document and return the updated list."""
-    await delete_nodes_by_filename(filename)
+    scope = _normalize_scope(scope)
+    success = await delete_nodes_by_filename(filename, scope=scope)
+    if not success:
+        target = f"{filename} (scope={scope})" if scope else f"{filename} (unscoped)"
+        raise HTTPException(status_code=404, detail=f"Document not found: {target}")
     CACHE.clear()
     # After deletion, return the updated list fragment
     docs = await list_all_documents()
@@ -752,14 +785,15 @@ async def chat_page(request: Request) -> HTMLResponse:
 async def upload_via_ui(
     request: Request, 
     file: UploadFile = File(...),
-    force_update: Optional[str] = Form(None)
+    force_update: Optional[str] = Form(None),
+    scope: Optional[str] = Form(None),
 ) -> HTMLResponse:
     is_htmx = _is_htmx(request)
     template_name = "partials/upload_result.html" if is_htmx else "upload_single.html"
     context = {}
     try:
         force_val = _parse_bool(force_update)
-        result = await ingest_api(file, force_update=force_val)
+        result = await ingest_api(file, force_update=force_val, scope=_normalize_scope(scope))
         context["result"] = result.model_dump()
     except HTTPException as exc:
         context["error"] = exc.detail
@@ -772,14 +806,15 @@ async def upload_via_ui(
 async def upload_batch_via_ui(
     request: Request, 
     files: List[UploadFile] = File(...),
-    force_update: Optional[str] = Form(None)
+    force_update: Optional[str] = Form(None),
+    scope: Optional[str] = Form(None),
 ) -> HTMLResponse:
     is_htmx = _is_htmx(request)
     template_name = "partials/batch_result.html" if is_htmx else "upload_batch.html"
     context = {}
     try:
         force_val = _parse_bool(force_update)
-        results = await ingest_batch(files, force_update=force_val)
+        results = await ingest_batch(files, force_update=force_val, scope=_normalize_scope(scope))
         context["results"] = [item.model_dump() for item in results]
     except HTTPException as exc:
         context["error"] = exc.detail
@@ -812,7 +847,7 @@ async def chat_via_ui(
         keywords_all=_parse_keywords(keywords_all),
         skip_rerank=_parse_bool(skip_rerank),
         skip_generation=_parse_bool(skip_generation),
-        scope=scope or None,
+        scope=_normalize_scope(scope),
     )
     is_htmx = _is_htmx(request)
     template_name = "partials/chat_result.html" if is_htmx else "chat.html"

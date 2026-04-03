@@ -2,6 +2,7 @@ import datetime
 import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
 from llama_index.core.schema import TextNode, NodeWithScore
+from app.ingest import compute_doc_hash, process_file
 from app.main import _parse_epoch_date
 from app.models import LLMAnalysis
 
@@ -179,6 +180,88 @@ def test_chat_lod_source_includes_scope(client):
     assert response.status_code == 200
     source = response.json()["sources"][0]
     assert source["scope"] == "reports/lod/2026"
+
+
+def test_ingest_scope_dedup_is_scoped(client):
+    content = "Scoped content"
+    expected_hash = compute_doc_hash(content)
+
+    with patch("app.main.adoc_exists", new=AsyncMock(return_value=True)) as mock_exists:
+        response = client.post(
+            "/ingest/text",
+            json={"content": content, "filename": "scoped.md", "scope": "reports/2026"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "skipped"
+    mock_exists.assert_awaited_once_with(expected_hash, scope="reports/2026")
+
+
+def test_documents_api_includes_scope(client):
+    docs = [
+        {
+            "filename": "scoped.md",
+            "date": "2026-01-01",
+            "chunks": 3,
+            "scope": "reports/2026",
+        }
+    ]
+    with patch("app.main.list_all_documents", new=AsyncMock(return_value=docs)):
+        response = client.get("/documents")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload[0]["scope"] == "reports/2026"
+
+
+def test_delete_document_passes_scope(client):
+    with patch(
+        "app.main.delete_nodes_by_filename",
+        new=AsyncMock(return_value=True),
+    ) as mock_delete:
+        response = client.delete("/documents/demo.md", params={"scope": "reports/2026"})
+
+    assert response.status_code == 200
+    mock_delete.assert_awaited_once_with("demo.md", scope="reports/2026")
+
+
+def test_documents_ui_delete_uses_scoped_query(client):
+    docs = [
+        {
+            "filename": "scoped.md",
+            "date": "2026-01-01",
+            "chunks": 1,
+            "scope": "reports/2026",
+        }
+    ]
+    with patch("app.main.list_all_documents", new=AsyncMock(return_value=docs)):
+        response = client.get("/ui/documents")
+
+    assert response.status_code == 200
+    assert "?scope=reports/2026" in response.text
+
+
+@pytest.mark.asyncio
+async def test_process_file_node_ids_include_scope():
+    with patch("app.ingest.analyze_document", new=AsyncMock(return_value=LLMAnalysis())):
+        nodes_a = await process_file(
+            "same.md",
+            "same content",
+            ingest_date="2026-01-01",
+            doc_hash="same-hash",
+            scope="a",
+        )
+        nodes_b = await process_file(
+            "same.md",
+            "same content",
+            ingest_date="2026-01-01",
+            doc_hash="same-hash",
+            scope="b",
+        )
+
+    assert nodes_a
+    assert nodes_b
+    assert nodes_a[0].id_ != nodes_b[0].id_
 
 
 def test_chat_cache_cleared_after_successful_ingest(client):

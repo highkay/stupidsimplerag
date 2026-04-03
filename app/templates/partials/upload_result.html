@@ -11,6 +11,9 @@
         <span class="text-lg font-semibold">入库完成</span>
         <p class="text-sm">{{ result.filename }} · {{ result.chunks }} 个切片</p>
         <p class="text-xs text-base-content/60">状态：{{ result.status }}</p>
+        {% if result.scope %}
+        <p class="text-xs text-base-content/60">Scope：{{ result.scope }}</p>
+        {% endif %}
     </div>
 </div>
 {% else %}

@@ -3,6 +3,7 @@
         <thead>
             <tr>
                 <th>Filename</th>
+                <th>Scope</th>
                 <th>Date</th>
                 <th>Chunks</th>
                 <th class="text-right">Actions</th>
@@ -12,7 +13,7 @@
             {% if documents %}
                 {% if documents|length >= 1000 %}
                 <tr>
-                    <td colspan="4" class="bg-warning/10 text-warning text-xs py-2 px-4 italic">
+                    <td colspan="5" class="bg-warning/10 text-warning text-xs py-2 px-4 italic">
                         注意：仅显示前 1000 个文档。如需精确管理，请使用 API 或搜索功能。
                     </td>
                 </tr>
@@ -20,6 +21,7 @@
                 {% for doc in documents %}
                 <tr id="doc-row-{{ loop.index }}">
                     <td class="font-medium">{{ doc.filename }}</td>
+                    <td>{{ doc.scope or '∅' }}</td>
                     <td>{{ doc.date or 'Unknown' }}</td>
                     <td>
                         <div class="badge badge-ghost">{{ doc.chunks }}</div>
@@ -27,9 +29,9 @@
                     <td class="text-right">
                         <button 
                             class="btn btn-error btn-xs"
-                            hx-delete="/ui/documents/{{ doc.filename }}"
+                            hx-delete="/ui/documents/{{ doc.filename }}{% if doc.scope %}?scope={{ doc.scope | urlencode }}{% endif %}"
                             hx-target="#document-list-container"
-                            hx-confirm="Are you sure you want to delete '{{ doc.filename }}'?"
+                            hx-confirm="Are you sure you want to delete '{{ doc.filename }}'{% if doc.scope %} in scope '{{ doc.scope }}'{% endif %}?"
                         >
                             Delete
                         </button>
@@ -38,7 +40,7 @@
                 {% endfor %}
             {% else %}
                 <tr>
-                    <td colspan="4" class="text-center py-4 text-base-content/50">No documents found.</td>
+                    <td colspan="5" class="text-center py-4 text-base-content/50">No documents found.</td>
                 </tr>
             {% endif %}
         </tbody>

@@ -854,6 +854,14 @@ def _ensure_payload_indexes(client: QdrantClient, collection_name: str) -> None:
         )
     except Exception:
         pass
+    try:
+        client.create_payload_index(
+            collection_name=collection_name,
+            field_name="filename",
+            field_schema=qdrant_models.PayloadSchemaType.KEYWORD,
+        )
+    except Exception:
+        pass
 
 
 def _append_port_if_missing(raw_url: str, default_port: int) -> str:
@@ -868,6 +876,7 @@ def _append_port_if_missing(raw_url: str, default_port: int) -> str:
 
 
 def _build_qdrant_store() -> QdrantVectorStore:
+    global _QDRANT_CLIENT_CACHE, _QDRANT_ASYNC_CLIENT_CACHE
     host = os.getenv("QDRANT_HOST", "qdrant")
     port = int(os.getenv("QDRANT_PORT", "6333"))
     collection = os.getenv("COLLECTION_NAME", "financial_reports")
@@ -877,6 +886,8 @@ def _build_qdrant_store() -> QdrantVectorStore:
     client_timeout = float(os.getenv("QDRANT_CLIENT_TIMEOUT", "60"))
 
     def _create_store(q_client: QdrantClient, q_aclient: AsyncQdrantClient) -> QdrantVectorStore:
+        _QDRANT_CLIENT_CACHE = q_client
+        _QDRANT_ASYNC_CLIENT_CACHE = q_aclient
         if logger.isEnabledFor(logging.INFO):
             logger.info(
                 "Ensuring Qdrant hybrid collection=%s dim=%s",
@@ -946,7 +957,10 @@ def _build_qdrant_store() -> QdrantVectorStore:
 
 vector_store = _build_qdrant_store()
 storage_context = StorageContext.from_defaults(vector_store=vector_store)
-_ASYNC_CLIENT_CACHE: AsyncQdrantClient | None = None
+_QDRANT_CLIENT_CACHE: QdrantClient | None = getattr(vector_store, "_client", None)
+_QDRANT_ASYNC_CLIENT_CACHE: AsyncQdrantClient | None = getattr(
+    vector_store, "_aclient", None
+)
 _INDEX_CACHE: VectorStoreIndex | None = None
 
 
@@ -959,6 +973,59 @@ def _get_index() -> VectorStoreIndex:
             vector_store, storage_context=storage_context
         )
     return _INDEX_CACHE
+
+
+def _get_async_client() -> AsyncQdrantClient:
+    if _QDRANT_ASYNC_CLIENT_CACHE is None:
+        raise RuntimeError("Qdrant async client is not initialized")
+    return _QDRANT_ASYNC_CLIENT_CACHE
+
+
+def _get_collection_name() -> Optional[str]:
+    return getattr(vector_store, "collection_name", None)
+
+
+def _unscoped_payload_conditions() -> List[Any]:
+    scope_field = qdrant_models.PayloadField(key="scope")
+    return [
+        qdrant_models.IsEmptyCondition(is_empty=scope_field),
+        qdrant_models.IsNullCondition(is_null=scope_field),
+    ]
+
+
+def _build_scoped_filter(
+    *,
+    filename: Optional[str] = None,
+    doc_hash: Optional[str] = None,
+    scope: Optional[str],
+) -> qdrant_models.Filter:
+    must: List[Any] = []
+    if filename:
+        must.append(
+            qdrant_models.FieldCondition(
+                key="filename", match=qdrant_models.MatchValue(value=filename)
+            )
+        )
+    if doc_hash:
+        must.append(
+            qdrant_models.FieldCondition(
+                key="doc_hash", match=qdrant_models.MatchValue(value=doc_hash)
+            )
+        )
+    if scope:
+        must.append(
+            qdrant_models.FieldCondition(
+                key="scope", match=qdrant_models.MatchValue(value=scope)
+            )
+        )
+        return qdrant_models.Filter(must=must)
+    return qdrant_models.Filter(
+        must=must,
+        min_should=qdrant_models.MinShould(
+            conditions=_unscoped_payload_conditions(),
+            min_count=1,
+        ),
+    )
 
 
 async def insert_nodes(nodes: List[TextNode]) -> None:
@@ -1178,44 +1245,10 @@ async def perform_hierarchical_search(
     return response
 
 
-def _build_async_client() -> AsyncQdrantClient:
-    global _ASYNC_CLIENT_CACHE
-    if _ASYNC_CLIENT_CACHE is not None:
-        return _ASYNC_CLIENT_CACHE
-
-    host = os.getenv("QDRANT_HOST", "qdrant")
-    port = int(os.getenv("QDRANT_PORT", "6333"))
-    qdrant_url = os.getenv("QDRANT_URL")
-    qdrant_api_key = os.getenv("QDRANT_API_KEY") or None
-    use_https = os.getenv("QDRANT_HTTPS", "false").lower() == "true"
-    client_timeout = float(os.getenv("QDRANT_CLIENT_TIMEOUT", "60"))
-
-    if qdrant_url:
-        qdrant_url = _append_port_if_missing(qdrant_url, port)
-        _ASYNC_CLIENT_CACHE = AsyncQdrantClient(
-            url=qdrant_url, api_key=qdrant_api_key, timeout=client_timeout
-        )
-        return _ASYNC_CLIENT_CACHE
-
-    resolved_host = host
-    running_in_container = os.path.exists("/.dockerenv")
-    if resolved_host == "qdrant" and not running_in_container:
-        resolved_host = "127.0.0.1"
-
-    _ASYNC_CLIENT_CACHE = AsyncQdrantClient(
-        host=resolved_host,
-        port=port,
-        https=use_https,
-        api_key=qdrant_api_key if use_https else None,
-        timeout=client_timeout,
-    )
-    return _ASYNC_CLIENT_CACHE
-
-
 async def get_collection_metrics() -> dict:
     """Expose lightweight collection metrics for the web dashboard (async client)."""
     metrics = {
-        "collection_name": getattr(vector_store, "collection_name", None),
+        "collection_name": _get_collection_name(),
         "vectors_count": None,
         "segments_count": None,
         "status": "uninitialized",
@@ -1226,7 +1259,7 @@ async def get_collection_metrics() -> dict:
     if not collection:
         return metrics
 
-    client = _build_async_client()
+    client = _get_async_client()
 
     try:
         await client.get_collections()
@@ -1351,24 +1384,18 @@ class TimeDecayPostprocessor(BaseNodePostprocessor):
         return nodes
 
 
-async def adoc_exists(doc_hash: str) -> bool:
+async def adoc_exists(doc_hash: str, scope: Optional[str] = None) -> bool:
     """Return True if collection already has a payload with the given doc_hash (async)."""
     if not doc_hash:
         return False
-    
-    collection = getattr(vector_store, "collection_name", None)
+
+    collection = _get_collection_name()
     if not collection:
         return False
-        
-    client = _build_async_client()
+
+    client = _get_async_client()
     try:
-        flt = qdrant_models.Filter(
-            must=[
-                qdrant_models.FieldCondition(
-                    key="doc_hash", match=qdrant_models.MatchValue(value=doc_hash)
-                )
-            ]
-        )
+        flt = _build_scoped_filter(doc_hash=doc_hash, scope=scope)
         # Using scroll with limit=1 to check existence
         result = await client.scroll(
             collection_name=collection,
@@ -1383,29 +1410,37 @@ async def adoc_exists(doc_hash: str) -> bool:
         return False
 
 
-async def delete_nodes_by_filename(filename: str) -> bool:
-    """Delete all nodes associated with a specific filename."""
+async def delete_nodes_by_filename(filename: str, scope: Optional[str] = None) -> bool:
+    """Delete all nodes associated with a specific scoped document."""
     if not filename:
         return False
-    client = _build_async_client()
-    collection = getattr(vector_store, "collection_name", None)
+    client = _get_async_client()
+    collection = _get_collection_name()
     if not collection:
         return False
     try:
+        flt = _build_scoped_filter(filename=filename, scope=scope)
+        points, _ = await client.scroll(
+            collection_name=collection,
+            scroll_filter=flt,
+            with_payload=False,
+            limit=1,
+        )
+        if not points:
+            return False
         await client.delete(
             collection_name=collection,
-            points_selector=qdrant_models.Filter(
-                must=[
-                    qdrant_models.FieldCondition(
-                        key="filename", match=qdrant_models.MatchValue(value=filename)
-                    )
-                ]
-            ),
+            points_selector=flt,
         )
-        logger.info("Deleted all nodes for filename=%s", filename)
+        logger.info("Deleted document filename=%s scope=%s", filename, scope)
         return True
     except Exception as exc:
-        logger.error("Failed to delete nodes for filename=%s: %s", filename, exc)
+        logger.error(
+            "Failed to delete nodes for filename=%s scope=%s: %s",
+            filename,
+            scope,
+            exc,
+        )
         return False
 
 
@@ -1414,12 +1449,12 @@ async def list_all_documents(limit: int = 1000) -> List[dict]:
     List unique documents in the collection by aggregating filename info.
     Returns a list of dicts: [{'filename': str, 'date': str, 'chunks': int}]
     """
-    client = _build_async_client()
-    collection = getattr(vector_store, "collection_name", None)
+    client = _get_async_client()
+    collection = _get_collection_name()
     if not collection:
         return []
 
-    docs = {}
+    docs: dict[tuple[str, Optional[str]], dict] = {}
     offset = None
     points_scanned = 0
     MAX_POINTS_TO_SCAN = 50000  # Safety cap to prevent infinite or extremely long scans
@@ -1430,7 +1465,7 @@ async def list_all_documents(limit: int = 1000) -> List[dict]:
                 collection_name=collection,
                 limit=1000,
                 offset=offset,
-                with_payload=["filename", "date"],
+                with_payload=["filename", "date", "scope"],
                 with_vectors=False,
             )
             points, next_offset = result
@@ -1442,16 +1477,19 @@ async def list_all_documents(limit: int = 1000) -> List[dict]:
                 fname = payload.get("filename")
                 if not fname:
                     continue
-                
-                if fname not in docs:
+
+                scope = payload.get("scope") or None
+                doc_key = (fname, scope)
+                if doc_key not in docs:
                     if len(docs) >= limit:
-                        continue # Keep counting chunks for existing ones but don't add new files
-                    docs[fname] = {
+                        continue  # Keep counting chunks for existing docs but don't add new ones
+                    docs[doc_key] = {
                         "filename": fname,
                         "date": payload.get("date"),
-                        "chunks": 0
+                        "chunks": 0,
+                        "scope": scope,
                     }
-                docs[fname]["chunks"] += 1
+                docs[doc_key]["chunks"] += 1
             
             points_scanned += len(points)
             offset = next_offset
@@ -1461,4 +1499,54 @@ async def list_all_documents(limit: int = 1000) -> List[dict]:
             logger.error("Error scrolling documents for listing: %s", exc)
             break
             
-    return sorted(list(docs.values()), key=lambda x: x["filename"])
+    return sorted(
+        list(docs.values()),
+        key=lambda item: (item["filename"], item.get("scope") or ""),
+    )
+
+
+async def shutdown_resources() -> None:
+    """Close recreatable transports without tearing down module-level core state."""
+    global _RERANK_HTTP_CLIENT, _RERANK_HTTP_ACLIENT
+    global _RERANK_OPENAI_CLIENT, _RERANK_OPENAI_ACLIENT
+
+    for client_name in ("_RERANK_HTTP_CLIENT",):
+        client = globals().get(client_name)
+        close = getattr(client, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:
+                pass
+
+    for client_name in ("_RERANK_HTTP_ACLIENT",):
+        client = globals().get(client_name)
+        aclose = getattr(client, "aclose", None)
+        if callable(aclose):
+            try:
+                await aclose()
+            except Exception:
+                pass
+
+    for client_name in ("_RERANK_OPENAI_CLIENT",):
+        client = globals().get(client_name)
+        close = getattr(client, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:
+                pass
+
+    for client_name in ("_RERANK_OPENAI_ACLIENT",):
+        client = globals().get(client_name)
+        aclose = getattr(client, "aclose", None)
+        if callable(aclose):
+            try:
+                await aclose()
+            except Exception:
+                pass
+
+    _RERANK_HTTP_CLIENT = None
+    _RERANK_HTTP_ACLIENT = None
+    _RERANK_OPENAI_CLIENT = None
+    _RERANK_OPENAI_ACLIENT = None

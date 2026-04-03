@@ -21,7 +21,7 @@
 
 3. 存储层
 - Qdrant 单集合（Dense: `text-dense`；Sparse: BM42）。
-- 自动创建 payload index：`date_numeric`、`doc_hash`、`scope`。
+- 自动创建 payload index：`date_numeric`、`doc_hash`、`scope`、`filename`。
 
 4. 模型层
 - LLM/Embedding/Rerank 均走 OpenAI 兼容协议。
@@ -36,7 +36,7 @@
 - `app/main.py`
   - API 路由：`/ingest`、`/ingest/batch`、`/ingest/text`、`/chat`、`/chat/lod`、`/documents`。
   - UI 路由：`/`、`/ui/upload`、`/ui/upload/batch`、`/ui/chat`、`/ui/documents`。
-  - 关键行为：缓存键构造、重试策略、成功入库后缓存失效、force_update 删除重建、HTMX 入口。
+  - 关键行为：缓存键构造、重试策略、成功入库后缓存失效、`scope` 归一化、按 `(filename, scope)` 删除重建、HTMX 入口。
 
 - `app/ingest.py`
   - `compute_doc_hash(content)`（SHA256）。
@@ -109,8 +109,8 @@
 
 ### 4.3 文档管理
 
-- `GET /documents`：按 filename 聚合并返回 chunk 数。
-- `DELETE /documents/{filename}`：删除全部切片并清缓存。
+- `GET /documents`：按 `(filename, scope)` 聚合并返回 chunk 数。
+- `DELETE /documents/{filename}`：支持可选查询参数 `scope`；未传时仅删除无 scope 文档，并清缓存。
 
 ## 5. 检索与排序流水线
 
@@ -144,6 +144,7 @@
 
 补充：`_node_to_source()` 会从节点 metadata 显式回填 `scope` 到 `SourceItem.scope`；
 若节点无该字段则返回 `null`。
+补充：节点 ID 会纳入 `scope`，避免相同内容跨 scope 写入时冲突。
 
 ## 7. 环境变量（代码中实际读取）
 
@@ -198,5 +199,5 @@
 
 1. 改检索链路：确认 `/chat` 与 `/chat/lod` 行为一致性。
 2. 改入库链路：确认 `force_update`、`doc_hash` 去重、缓存清理未回归。
-3. 改过滤逻辑：补 `keywords_any/all`、`scope` 相关测试。
+3. 改过滤逻辑：补 `keywords_any/all`、`scope` 相关测试，并确认文档管理接口仍按 `(filename, scope)` 安全工作。
 4. 改配置项：补 `.env.example` 与 README 对应说明。

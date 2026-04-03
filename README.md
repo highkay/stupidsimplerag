@@ -70,7 +70,7 @@ uvicorn app.main:app --reload
 
 - 支持 `.md` / `.txt`
 - `force_update`（可选）：`true` 时先删同名文档再重建
-- `scope`（可选）：逻辑命名空间，写入 metadata
+- `scope`（可选）：逻辑命名空间，作为文档身份的一部分写入 metadata
 - 可选请求头 `X-File-Mtime`：支持 Unix 时间戳（秒/毫秒）或 ISO 时间，按 `APP_TIMEZONE`（或 `TZ`）归一为日期
 
 `/ingest/text` 请求体：
@@ -122,8 +122,8 @@ curl -X POST http://localhost:8000/chat \
 
 | Endpoint | Method | 说明 |
 | --- | --- | --- |
-| `/documents` | `GET` | 列出文档（按 filename 聚合） |
-| `/documents/{filename}` | `DELETE` | 删除该文档全部切片，并清空查询缓存 |
+| `/documents` | `GET` | 列出文档（按 `filename + scope` 聚合） |
+| `/documents/{filename}` | `DELETE` | 删除指定文档切片；可选查询参数 `scope`，未传时仅删除无 scope 文档 |
 
 ## Web 控制台
 
@@ -142,8 +142,9 @@ curl -X POST http://localhost:8000/chat \
 
 1. 去重与幂等
 - `doc_hash = sha256(content)`。
-- 若存在同 `doc_hash` 且未 `force_update`，入库返回 `status=skipped`。
-- 节点 ID 使用 `md5(doc_hash + chunk_idx)`，避免重复写入。
+- 若同一 `scope` 内已存在相同 `doc_hash` 且未 `force_update`，入库返回 `status=skipped`。
+- 节点 ID 使用 `md5(doc_hash + scope + chunk_idx)`，避免跨 scope 冲突。
+- `scope` 参与文档身份；同内容可在不同 scope 中并存。
 
 2. 检索后处理顺序
 - `APIReranker`（可跳过）
@@ -164,6 +165,7 @@ curl -X POST http://localhost:8000/chat \
 5. 时区基线
 - 应用统一使用 `APP_TIMEZONE`（回退 `TZ`，默认 `Asia/Shanghai`）。
 - 时间戳解析、`/ingest/text` 默认日期、时间衰减均按同一时区计算。
+- 依赖 `tzdata` 保证无系统 IANA 时区数据库环境下的行为一致性。
 
 ## 配置说明（.env）
 
@@ -221,6 +223,7 @@ pytest -q
 当前测试构成：
 
 - `test/test_features_scope.py`：Mock 测试（scope 透传、LOD 路由）。
+- `test/test_features_scope.py` 额外覆盖 scope 去重、文档列表与 scoped 删除行为。
 - `test/test_offline_ingest.py`：离线批量入库脚本的批次结果处理测试。
 - `test/test_api.py`：真实链路测试（依赖可用的 LLM/Embedding/Qdrant）。
 

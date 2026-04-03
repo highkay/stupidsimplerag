@@ -17,6 +17,7 @@
                 <thead>
                     <tr>
                         <th>文件名</th>
+                        <th>Scope</th>
                         <th>切片</th>
                         <th>状态</th>
                         <th>错误</th>
@@ -26,6 +27,7 @@
                 {% for item in results %}
                     <tr>
                         <td class="font-semibold">{{ item.filename }}</td>
+                        <td>{{ item.scope or '∅' }}</td>
                         <td>{{ item.chunks }}</td>
                         <td>
                             {% if item.status == "ok" %}
