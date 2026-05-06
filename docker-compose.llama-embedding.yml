@@ -1,8 +1,12 @@
 services:
   embedding:
-    image: ghcr.io/ggml-org/llama.cpp:server
+    image: ghcr.io/ggml-org/llama.cpp:server-vulkan
     ports:
       - "${EMBEDDING_PUBLIC_PORT:-18083}:8080"
+    group_add:
+      - video
+    devices:
+      - /dev/dri
     volumes:
       - "${EMBEDDING_GGUF_HOST_PATH:-./embedding-models/gguf-jina-v5}:/models:ro"
     command:
@@ -11,6 +15,8 @@ services:
       - --embedding
       - --pooling
       - last
+      - -ngl
+      - "999"
       - -c
       - "${EMBEDDING_CONTEXT_WINDOW:-8192}"
       - -ub

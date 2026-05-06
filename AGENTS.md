@@ -25,7 +25,7 @@
 
 4. 模型层
 - LLM/Embedding/Rerank 均走 OpenAI 兼容协议。
-- 自托管 embedding 推荐通过独立 `llama.cpp` 服务接入，不与主 API 镜像混装；Jina retrieval 场景可通过 `EMBEDDING_QUERY_PREFIX` / `EMBEDDING_DOCUMENT_PREFIX` 启用 query/document 前缀。
+- 自托管 embedding 推荐通过独立 `llama.cpp` Vulkan 服务接入，不与主 API 镜像混装；Jina retrieval 场景可通过 `EMBEDDING_QUERY_PREFIX` / `EMBEDDING_DOCUMENT_PREFIX` 启用 query/document 前缀。
 - Rerank 同时支持 `/rerank` endpoint 与 `/chat/completions` 风格。
 
 ## 3. 代码地图（按职责）

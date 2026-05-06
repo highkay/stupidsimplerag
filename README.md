@@ -49,7 +49,7 @@ docker compose up -d
 - API: `http://localhost:8005`（容器内 8000）
 - Qdrant: `http://localhost:6333`
 
-使用自托管 `llama.cpp + F16 GGUF` Embedding（独立服务，不混入主 API 镜像）：
+使用自托管 `llama.cpp + Vulkan + F16 GGUF` Embedding（独立服务，不混入主 API 镜像）：
 
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.llama-embedding.yml up -d
@@ -61,7 +61,9 @@ docker compose -f docker-compose.yml -f docker-compose.llama-embedding.yml up -d
 - `EMBEDDING_GGUF_FILE`
 - `EMBEDDING_COLLECTION_NAME`（建议新集合，如 `financial_reports_jina_v5_1024`）
 
-该覆盖文件会基于当前源码构建 `highkay/stupidsimplerag:llama-embedding`，避免误用旧的 `latest` 运行时镜像。
+该覆盖文件会基于当前源码构建 `highkay/stupidsimplerag:llama-embedding`，避免误用旧的 `latest` 运行时镜像，并使用 `ghcr.io/ggml-org/llama.cpp:server-vulkan` 将 embedding 计算卸载到 Vulkan 设备。
+
+Vulkan 模式要求宿主机可用 `/dev/dri`，并且容器需加入 `video` group；覆盖文件已内置这些配置。
 
 该覆盖文件会把 API 自动切到：
 
@@ -302,7 +304,7 @@ pytest -q
 ## Docker 与 CI
 
 - Dockerfile 使用 `python:3.13-slim`，启动命令为 Gunicorn + Uvicorn worker。
-- `docker-compose.yml` 维持基础 API + Qdrant 栈；`docker-compose.llama-embedding.yml` 以覆盖文件方式增加独立 `llama.cpp` Embedding 服务，避免把模型塞进主镜像。
+- `docker-compose.yml` 维持基础 API + Qdrant 栈；`docker-compose.llama-embedding.yml` 以覆盖文件方式增加独立 `llama.cpp` Vulkan Embedding 服务，避免把模型塞进主镜像。
 - Dockerfile 构建层依赖 BuildKit cache mount 复用 `apt`、`pip` 与 FastEmbed 缓存；推荐本地构建时启用 `DOCKER_BUILDKIT=1`。
 - Docker 镜像内置 `HEALTHCHECK`，探测 `GET /health`。
 - 镜像内默认 `TZ=Asia/Shanghai`，并安装 `tzdata`；`docker-compose` 同步为 `api`/`qdrant` 注入 `TZ`。
