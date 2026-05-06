@@ -61,6 +61,7 @@ def test_init_embedding_model_uses_compat_client_when_prefixes_enabled(monkeypat
     monkeypatch.setattr(core, "embedding_dim", 1024)
     monkeypatch.setattr(core, "embedding_base", "http://embedding:8080/v1")
     monkeypatch.setattr(core, "embedding_key", None)
+    monkeypatch.setattr(core, "embedding_timeout", 75.0)
 
     def _unexpected_openai_embedding(**kwargs):
         raise AssertionError("OpenAIEmbedding should not be used when prefixes are configured")
@@ -74,3 +75,4 @@ def test_init_embedding_model_uses_compat_client_when_prefixes_enabled(monkeypat
     assert isinstance(model._base_model, core.OpenAICompatibleEmbedding)
     assert model._base_model._query_prefix == "Query: "
     assert model._base_model._text_prefix == "Document: "
+    assert model._base_model._timeout == 75.0

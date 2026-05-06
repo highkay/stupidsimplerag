@@ -99,6 +99,7 @@ embedding_kwargs = get_openai_kwargs("EMBEDDING")
 embedding_dim = int(os.getenv("EMBEDDING_DIM", "1536"))
 embedding_query_prefix = os.getenv("EMBEDDING_QUERY_PREFIX", "")
 embedding_document_prefix = os.getenv("EMBEDDING_DOCUMENT_PREFIX", "")
+embedding_timeout = float(os.getenv("EMBEDDING_TIMEOUT", "60"))
 llm_context_window = int(os.getenv("LLM_CONTEXT_WINDOW", "8192"))
 EMBEDDING_MAX_RETRIES = int(os.getenv("EMBEDDING_MAX_RETRIES", "3"))
 EMBEDDING_RETRY_BACKOFF = float(os.getenv("EMBEDDING_RETRY_BACKOFF", "1.5"))
@@ -375,6 +376,7 @@ def _init_embedding_model() -> BaseEmbedding:
             api_key=embedding_key,
             api_base=embedding_base,
             dimensions=embedding_dim,
+            timeout=embedding_timeout,
             query_prefix=query_prefix,
             text_prefix=text_prefix,
         )
@@ -383,6 +385,7 @@ def _init_embedding_model() -> BaseEmbedding:
             base_model = OpenAIEmbedding(
                 model=model_name,
                 dimensions=embedding_dim,
+                timeout=embedding_timeout,
                 **embedding_kwargs,
             )
         except ValueError:
@@ -391,6 +394,7 @@ def _init_embedding_model() -> BaseEmbedding:
                 api_key=embedding_key,
                 api_base=embedding_base,
                 dimensions=embedding_dim,
+                timeout=embedding_timeout,
             )
     if embedding_dim > 0:
         return FixedDimensionEmbedding(base_model, embedding_dim)
@@ -1137,7 +1141,7 @@ async def insert_nodes(nodes: List[TextNode]) -> None:
         return
     
     # Batch size for insertion to avoid overloading embedding API or Vector DB
-    BATCH_SIZE = int(os.getenv("INSERT_BATCH_SIZE", "50"))
+    BATCH_SIZE = int(os.getenv("INSERT_BATCH_SIZE", "8"))
     total_nodes = len(nodes)
     logger.info("Inserting %d nodes into Qdrant (will trigger embedding) in batches of %d", total_nodes, BATCH_SIZE)
     

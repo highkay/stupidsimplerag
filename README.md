@@ -238,7 +238,7 @@ curl -X POST http://localhost:8000/chat \
 ### 核心配置
 
 - `LLM_MODEL`, `OPENAI_API_KEY`, `OPENAI_API_BASE`
-- `EMBEDDING_MODEL`, `EMBEDDING_API_KEY`, `EMBEDDING_API_BASE`, `EMBEDDING_DIM`
+- `EMBEDDING_MODEL`, `EMBEDDING_API_KEY`, `EMBEDDING_API_BASE`, `EMBEDDING_DIM`, `EMBEDDING_TIMEOUT`
 - `EMBEDDING_QUERY_PREFIX`, `EMBEDDING_DOCUMENT_PREFIX`（为空时保持旧行为；Jina retrieval 建议分别设为 `Query:` / `Document:`）
 - `RERANK_API_URL`, `RERANK_API_KEY`, `RERANK_MODEL`
 - `QDRANT_HOST`, `QDRANT_PORT`, `QDRANT_URL`, `QDRANT_API_KEY`, `COLLECTION_NAME`
@@ -324,6 +324,13 @@ pytest -q
 5. 旧 `768` 维集合确认不再需要后再删除。
 
 若接受停机，最简单路径是直接切换 `.env` 中的 `COLLECTION_NAME` / `EMBEDDING_DIM` 后执行 `python reset_qdrant.py -y`，然后重新回灌全部文档。
+
+共享自托管 embedding 服务时，建议显式设置：
+
+- `EMBEDDING_TIMEOUT=60`
+- `INSERT_BATCH_SIZE=8`
+
+这样可以避免大文档入库时单次 `/v1/embeddings` 请求超过客户端超时，导致 `/ingest` 或 `/ingest/text` 返回 `500`。
 
 ## 关联文档
 
