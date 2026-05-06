@@ -2,7 +2,7 @@ services:
   qdrant:
     image: qdrant/qdrant:latest
     ports:
-      - "6333:6333"
+      - "${QDRANT_PUBLIC_PORT:-6333}:6333"
     volumes:
       - ./qdrant_data:/qdrant/storage
     environment:
@@ -14,7 +14,7 @@ services:
     image: highkay/stupidsimplerag:latest
     # 若需本地源码热更，可改为 build: . 并挂载 ./app
     ports:
-      - "8005:8000"
+      - "${API_PUBLIC_PORT:-8005}:8000"
     env_file: .env
     environment:
       - TZ=${TZ:-Asia/Shanghai}

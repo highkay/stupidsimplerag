@@ -25,6 +25,7 @@
 
 4. 模型层
 - LLM/Embedding/Rerank 均走 OpenAI 兼容协议。
+- 自托管 embedding 推荐通过独立 `llama.cpp` 服务接入，不与主 API 镜像混装；Jina retrieval 场景可通过 `EMBEDDING_QUERY_PREFIX` / `EMBEDDING_DOCUMENT_PREFIX` 启用 query/document 前缀。
 - Rerank 同时支持 `/rerank` endpoint 与 `/chat/completions` 风格。
 
 ## 3. 代码地图（按职责）
@@ -69,6 +70,7 @@
   - `reset_qdrant.py`：危险重置集合。
 - `preload_models.py`：预下载 FastEmbed 稀疏模型。
 - `Dockerfile`：使用 BuildKit cache mount 缓存 `apt`、`pip` 与 FastEmbed 构建依赖，并可用本地 `model_cache` 加速模型预热。
+- `docker-compose.llama-embedding.yml`：可选覆盖文件，增加独立 `llama.cpp` Embedding 服务、基于当前源码构建 `api` 镜像，并把 API 切到 1024 维自托管检索栈。
 
 ## 4. API 合同（当前实现）
 
@@ -177,6 +179,7 @@
 1. 模型与协议
 - `LLM_MODEL`, `OPENAI_API_KEY`, `OPENAI_API_BASE`
 - `EMBEDDING_MODEL`, `EMBEDDING_API_KEY`, `EMBEDDING_API_BASE`, `EMBEDDING_DIM`
+- `EMBEDDING_QUERY_PREFIX`, `EMBEDDING_DOCUMENT_PREFIX`
 - `RERANK_API_URL`, `RERANK_API_BASE`, `RERANK_API_KEY`, `RERANK_MODEL`, `RERANK_TIMEOUT`, `RERANK_RETURN_DOCUMENTS`
 
 2. 检索策略
@@ -193,20 +196,26 @@
 4. Qdrant
 - `QDRANT_HOST`, `QDRANT_PORT`, `QDRANT_HTTPS`, `QDRANT_URL`, `QDRANT_API_KEY`, `QDRANT_CLIENT_TIMEOUT`, `COLLECTION_NAME`
 
-5. Sparse 模型缓存
+5. Docker / 端口 / 自托管 Embedding
+- `API_PUBLIC_PORT`, `QDRANT_PUBLIC_PORT`, `EMBEDDING_PUBLIC_PORT`
+- `EMBEDDING_GGUF_HOST_PATH`, `EMBEDDING_GGUF_FILE`, `EMBEDDING_CONTEXT_WINDOW`, `EMBEDDING_UBATCH`
+- `SELF_HOSTED_EMBEDDING_MODEL`, `SELF_HOSTED_EMBEDDING_DIM`, `EMBEDDING_COLLECTION_NAME`
+
+6. Sparse 模型缓存
 - `FASTEMBED_CACHE_PATH`, `FASTEMBED_SPARSE_MODEL`
 
-6. 日志
+7. 日志
 - `APP_LOG_LEVEL`（优先）
 - `LOG_LEVEL`
 
-7. 时区
+8. 时区
 - `APP_TIMEZONE`（应用时区，默认 `Asia/Shanghai`）
 - `TZ`（容器/系统时区，建议与 `APP_TIMEZONE` 一致）
 
 ## 8. 测试现状
 
 - `test/test_features_scope.py`：mock 测试（scope 与 LOD 路由行为）。
+- `test/test_embedding_service.py`：embedding 前缀与兼容客户端初始化测试。
 - `test/test_grounding.py`：grounding 请求/响应与新 metadata 测试。
 - `test/test_offline_ingest.py`：离线批量入库脚本的批次结果处理测试。
 - `test/test_api.py`：真实链路测试（依赖外部模型服务与 Qdrant）。

@@ -11,7 +11,7 @@ from llama_index.core.schema import TextNode
 
 from app.models import LLMAnalysis
 from app.openai_utils import OpenAICompatibleLLM, get_openai_kwargs
-from app.preprocess import split_document_blocks
+from app.preprocess import split_document_blocks, summarize_chunk_blocks
 from app.utils import extract_date_from_filename
 
 logger = logging.getLogger(__name__)
@@ -228,15 +228,9 @@ async def process_file(
             max_chunk_len = chunk_len
         full_text = f"{header_text}{chunk_text}"
         local_blocks = split_document_blocks(chunk_text, allow_title=False)
-        dominant_block = max(
-            local_blocks,
-            key=lambda block: (len(block.text), int(block.section_type == "body")),
-            default=None,
+        section_type, heading_path, is_list_zone, is_qa_zone = summarize_chunk_blocks(
+            local_blocks
         )
-        section_type = dominant_block.section_type if dominant_block else "body"
-        heading_path = dominant_block.heading_path if dominant_block else None
-        is_list_zone = any(block.is_list_zone for block in local_blocks)
-        is_qa_zone = any(block.is_qa_zone for block in local_blocks)
         node_metadata = {
             "filename": filename,
             "date": meta_date,

@@ -31,6 +31,10 @@ class PreprocessedBlock:
     is_qa_zone: bool = False
 
 
+LIST_SECTION_TYPES = frozenset({"appendix_list", "appendix_table"})
+BODY_SECTION_TYPES = frozenset({"title", "body"})
+
+
 def _normalize_text(text: str) -> str:
     return (text or "").replace("\r\n", "\n").replace("\r", "\n")
 
@@ -52,12 +56,23 @@ def _looks_like_short_delimited_list(text: str) -> bool:
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     if not lines:
         return False
+    sentence_punctuation = ("。", "！", "？")
+    if any(any(mark in line for mark in sentence_punctuation) for line in lines):
+        return False
+    max_len = max((len(line) for line in lines), default=0)
     short_lines = [line for line in lines if len(line) <= 80]
     if len(short_lines) >= 3 and len(short_lines) == len(lines):
-        return True
+        return max_len <= 24
     joined = " ".join(lines)
-    delimiters = joined.count("、") + joined.count(",") + joined.count("，") + joined.count("；") + joined.count("/")
-    return delimiters >= 2 and max((len(line) for line in lines), default=0) <= 120
+    delimiters = (
+        joined.count("、")
+        + joined.count(",")
+        + joined.count("，")
+        + joined.count("；")
+        + joined.count(";")
+        + joined.count("/")
+    )
+    return delimiters >= 2 and max_len <= 36
 
 
 def _looks_like_list_block(text: str, heading_path: str | None) -> bool:
@@ -99,6 +114,55 @@ def classify_document_block(
     if _looks_like_list_block(stripped, heading_path):
         return "appendix_list", True, False
     return "body", False, False
+
+
+def summarize_chunk_blocks(
+    blocks: list[PreprocessedBlock],
+) -> tuple[str, str | None, bool, bool]:
+    if not blocks:
+        return "body", None, False, False
+
+    bucket_lengths = {"body": 0, "qa": 0, "list": 0}
+    bucket_blocks = {"body": [], "qa": [], "list": []}
+    fallback_heading_path = next((block.heading_path for block in blocks if block.heading_path), None)
+
+    for block in blocks:
+        text_len = len((block.text or "").strip())
+        if block.section_type in LIST_SECTION_TYPES:
+            bucket = "list"
+        elif block.section_type == "qa":
+            bucket = "qa"
+        else:
+            bucket = "body"
+        bucket_lengths[bucket] += text_len
+        bucket_blocks[bucket].append(block)
+
+    if bucket_lengths["body"] >= max(bucket_lengths["qa"], bucket_lengths["list"]):
+        bucket = "body"
+    elif bucket_lengths["qa"] >= bucket_lengths["list"]:
+        bucket = "qa"
+    else:
+        bucket = "list"
+
+    candidates = bucket_blocks[bucket] or blocks
+    dominant_block = max(
+        candidates,
+        key=lambda block: (
+            len((block.text or "").strip()),
+            -block.section_order,
+            -block.block_index,
+        ),
+    )
+    heading_path = dominant_block.heading_path or fallback_heading_path
+
+    if bucket == "body":
+        section_type = dominant_block.section_type if dominant_block.section_type in BODY_SECTION_TYPES else "body"
+    elif bucket == "qa":
+        section_type = "qa"
+    else:
+        section_type = dominant_block.section_type if dominant_block.section_type in LIST_SECTION_TYPES else "appendix_list"
+
+    return section_type, heading_path, bucket == "list", bucket == "qa"
 
 
 def split_document_blocks(content: str, *, allow_title: bool = True) -> list[PreprocessedBlock]:

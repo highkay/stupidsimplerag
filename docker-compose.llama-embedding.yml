@@ -1,0 +1,44 @@
+services:
+  embedding:
+    image: ghcr.io/ggml-org/llama.cpp:server
+    ports:
+      - "${EMBEDDING_PUBLIC_PORT:-18083}:8080"
+    volumes:
+      - "${EMBEDDING_GGUF_HOST_PATH:-./embedding-models/gguf-jina-v5}:/models:ro"
+    command:
+      - -m
+      - /models/${EMBEDDING_GGUF_FILE:-v5-small-retrieval-F16.gguf}
+      - --embedding
+      - --pooling
+      - last
+      - -c
+      - "${EMBEDDING_CONTEXT_WINDOW:-8192}"
+      - -ub
+      - "${EMBEDDING_UBATCH:-2048}"
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8080"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/health >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+
+  api:
+    build: .
+    image: highkay/stupidsimplerag:llama-embedding
+    environment:
+      EMBEDDING_API_BASE: http://embedding:8080/v1
+      EMBEDDING_MODEL: ${SELF_HOSTED_EMBEDDING_MODEL:-jina-embeddings-v5-text-small-retrieval}
+      EMBEDDING_DIM: ${SELF_HOSTED_EMBEDDING_DIM:-1024}
+      EMBEDDING_QUERY_PREFIX: ${EMBEDDING_QUERY_PREFIX:-Query:}
+      EMBEDDING_DOCUMENT_PREFIX: ${EMBEDDING_DOCUMENT_PREFIX:-Document:}
+      COLLECTION_NAME: ${EMBEDDING_COLLECTION_NAME:-financial_reports_jina_v5_1024}
+    depends_on:
+      qdrant:
+        condition: service_started
+      embedding:
+        condition: service_healthy

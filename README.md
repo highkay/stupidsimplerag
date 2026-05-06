@@ -49,6 +49,30 @@ docker compose up -d
 - API: `http://localhost:8005`（容器内 8000）
 - Qdrant: `http://localhost:6333`
 
+使用自托管 `llama.cpp + F16 GGUF` Embedding（独立服务，不混入主 API 镜像）：
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.llama-embedding.yml up -d
+```
+
+启用该模式前，需先准备本地 GGUF 目录并设置：
+
+- `EMBEDDING_GGUF_HOST_PATH`
+- `EMBEDDING_GGUF_FILE`
+- `EMBEDDING_COLLECTION_NAME`（建议新集合，如 `financial_reports_jina_v5_1024`）
+
+该覆盖文件会基于当前源码构建 `highkay/stupidsimplerag:llama-embedding`，避免误用旧的 `latest` 运行时镜像。
+
+该覆盖文件会把 API 自动切到：
+
+- `EMBEDDING_API_BASE=http://embedding:8080/v1`
+- `EMBEDDING_MODEL=jina-embeddings-v5-text-small-retrieval`
+- `EMBEDDING_DIM=1024`
+- `EMBEDDING_QUERY_PREFIX=Query:`
+- `EMBEDDING_DOCUMENT_PREFIX=Document:`
+
+注意：从 `768` 维模型切到 `1024` 维时，必须迁移到新 Qdrant 集合后再回灌，不能直接复用旧 dense 向量集合。
+
 本地开发（不走容器）：
 
 ```bash
@@ -213,8 +237,12 @@ curl -X POST http://localhost:8000/chat \
 
 - `LLM_MODEL`, `OPENAI_API_KEY`, `OPENAI_API_BASE`
 - `EMBEDDING_MODEL`, `EMBEDDING_API_KEY`, `EMBEDDING_API_BASE`, `EMBEDDING_DIM`
+- `EMBEDDING_QUERY_PREFIX`, `EMBEDDING_DOCUMENT_PREFIX`（为空时保持旧行为；Jina retrieval 建议分别设为 `Query:` / `Document:`）
 - `RERANK_API_URL`, `RERANK_API_KEY`, `RERANK_MODEL`
 - `QDRANT_HOST`, `QDRANT_PORT`, `QDRANT_URL`, `QDRANT_API_KEY`, `COLLECTION_NAME`
+- `API_PUBLIC_PORT`, `QDRANT_PUBLIC_PORT`
+- `EMBEDDING_PUBLIC_PORT`, `EMBEDDING_GGUF_HOST_PATH`, `EMBEDDING_GGUF_FILE`
+- `SELF_HOSTED_EMBEDDING_MODEL`, `SELF_HOSTED_EMBEDDING_DIM`, `EMBEDDING_COLLECTION_NAME`
 - `APP_TIMEZONE`（默认 `Asia/Shanghai`）、`TZ`（容器系统时区，建议与 `APP_TIMEZONE` 一致）
 
 ### 检索与策略
@@ -274,6 +302,7 @@ pytest -q
 ## Docker 与 CI
 
 - Dockerfile 使用 `python:3.13-slim`，启动命令为 Gunicorn + Uvicorn worker。
+- `docker-compose.yml` 维持基础 API + Qdrant 栈；`docker-compose.llama-embedding.yml` 以覆盖文件方式增加独立 `llama.cpp` Embedding 服务，避免把模型塞进主镜像。
 - Dockerfile 构建层依赖 BuildKit cache mount 复用 `apt`、`pip` 与 FastEmbed 缓存；推荐本地构建时启用 `DOCKER_BUILDKIT=1`。
 - Docker 镜像内置 `HEALTHCHECK`，探测 `GET /health`。
 - 镜像内默认 `TZ=Asia/Shanghai`，并安装 `tzdata`；`docker-compose` 同步为 `api`/`qdrant` 注入 `TZ`。
@@ -281,6 +310,18 @@ pytest -q
 - GitHub Actions（`.github/workflows/docker-publish.yml`）在 `main` 相关文件变更时自动推送镜像：
   - `highkay/stupidsimplerag:latest`
   - `highkay/stupidsimplerag:<commit_sha>`
+
+## 迁移到 1024 维 Embedding
+
+`gemini-embedding-001` 的 `768` 维 dense 向量集合，不能直接切换到 `jina-embeddings-v5-text-small-retrieval` 的 `1024` 维集合继续使用。推荐蓝绿迁移：
+
+1. 启动 `docker-compose.llama-embedding.yml`，使用新的 `EMBEDDING_COLLECTION_NAME`。
+2. 用 `python reset_qdrant.py --collection <new_collection> --dim 1024 -y` 创建新集合。
+3. 通过现有 `/ingest`、`/ingest/batch`、`/ingest/text` 或 `offline_ingest.py` 对原始文档全量回灌。
+4. 验证 `/chat`、`/chat/lod`、`/grounding/query` 后，再把生产流量切到新集合。
+5. 旧 `768` 维集合确认不再需要后再删除。
+
+若接受停机，最简单路径是直接切换 `.env` 中的 `COLLECTION_NAME` / `EMBEDDING_DIM` 后执行 `python reset_qdrant.py -y`，然后重新回灌全部文档。
 
 ## 关联文档
 

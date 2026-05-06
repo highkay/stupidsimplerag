@@ -97,6 +97,8 @@ embedding_base, embedding_key = get_openai_config("EMBEDDING")
 llm_base, llm_key = get_openai_config("LLM")
 embedding_kwargs = get_openai_kwargs("EMBEDDING")
 embedding_dim = int(os.getenv("EMBEDDING_DIM", "1536"))
+embedding_query_prefix = os.getenv("EMBEDDING_QUERY_PREFIX", "")
+embedding_document_prefix = os.getenv("EMBEDDING_DOCUMENT_PREFIX", "")
 llm_context_window = int(os.getenv("LLM_CONTEXT_WINDOW", "8192"))
 EMBEDDING_MAX_RETRIES = int(os.getenv("EMBEDDING_MAX_RETRIES", "3"))
 EMBEDDING_RETRY_BACKOFF = float(os.getenv("EMBEDDING_RETRY_BACKOFF", "1.5"))
@@ -112,6 +114,15 @@ _default_fastembed_cache_dir = os.path.join(
 fastembed_cache_dir = os.getenv("FASTEMBED_CACHE_PATH") or (
     _default_fastembed_cache_dir if os.path.isdir(_default_fastembed_cache_dir) else None
 )
+
+
+def _normalize_embedding_prefix(value: Optional[str]) -> str:
+    if value is None:
+        return ""
+    normalized = value.strip()
+    if not normalized:
+        return ""
+    return normalized if normalized.endswith(" ") else f"{normalized} "
 
 
 def _log_rerank_retry(retry_state: RetryCallState) -> None:
@@ -136,6 +147,8 @@ class OpenAICompatibleEmbedding(BaseEmbedding):
         api_base: Optional[str],
         dimensions: Optional[int] = None,
         timeout: float = 30.0,
+        query_prefix: str = "",
+        text_prefix: str = "",
         **kwargs: Any,
     ) -> None:
         super().__init__(model_name=model or "openai-compatible", **kwargs)
@@ -146,6 +159,8 @@ class OpenAICompatibleEmbedding(BaseEmbedding):
         self._timeout = timeout
         self._max_retries = EMBEDDING_MAX_RETRIES
         self._retry_backoff = EMBEDDING_RETRY_BACKOFF
+        self._query_prefix = _normalize_embedding_prefix(query_prefix)
+        self._text_prefix = _normalize_embedding_prefix(text_prefix)
         
         # Persistent clients for connection pooling
         self._client = httpx.Client(timeout=self._timeout)
@@ -156,6 +171,17 @@ class OpenAICompatibleEmbedding(BaseEmbedding):
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
         return headers
+
+    def _prepare_query_input(self, query: str) -> str:
+        return f"{self._query_prefix}{query}" if self._query_prefix else query
+
+    def _prepare_text_input(self, text: str) -> str:
+        return f"{self._text_prefix}{text}" if self._text_prefix else text
+
+    def _prepare_text_inputs(self, texts: List[str]) -> List[str]:
+        if not self._text_prefix:
+            return texts
+        return [self._prepare_text_input(text) for text in texts]
 
     def _send_embedding_request(self, inputs: List[str]) -> List[dict]:
         payload: dict = {"model": self._model, "input": inputs}
@@ -238,22 +264,22 @@ class OpenAICompatibleEmbedding(BaseEmbedding):
         return embeddings
 
     def _get_query_embedding(self, query: str) -> List[float]:
-        return self._embedding_request([query])[0]
+        return self._embedding_request([self._prepare_query_input(query)])[0]
 
     async def _aget_query_embedding(self, query: str) -> List[float]:
-        return (await self._aembedding_request([query]))[0]
+        return (await self._aembedding_request([self._prepare_query_input(query)]))[0]
 
     def _get_text_embedding(self, text: str) -> List[float]:
-        return self._embedding_request([text])[0]
+        return self._embedding_request([self._prepare_text_input(text)])[0]
 
     async def _aget_text_embedding(self, text: str) -> List[float]:
-        return (await self._aembedding_request([text]))[0]
+        return (await self._aembedding_request([self._prepare_text_input(text)]))[0]
 
     def _get_text_embeddings(self, texts: List[str]) -> List[List[float]]:
-        return self._embedding_request(texts)
+        return self._embedding_request(self._prepare_text_inputs(texts))
     
     async def _aget_text_embeddings(self, texts: List[str]) -> List[List[float]]:
-        return await self._aembedding_request(texts)
+        return await self._aembedding_request(self._prepare_text_inputs(texts))
 
 
 class FixedDimensionEmbedding(BaseEmbedding):
@@ -332,24 +358,40 @@ class FixedDimensionEmbedding(BaseEmbedding):
 
 def _init_embedding_model() -> BaseEmbedding:
     model_name = os.getenv("EMBEDDING_MODEL")
+    query_prefix = embedding_query_prefix
+    text_prefix = embedding_document_prefix
     base_model: BaseEmbedding
     if logger.isEnabledFor(logging.INFO):
         logger.info(
-            "Initializing embedding model=%s dim=%s", model_name, embedding_dim
+            "Initializing embedding model=%s dim=%s query_prefix=%s text_prefix=%s",
+            model_name,
+            embedding_dim,
+            bool(query_prefix),
+            bool(text_prefix),
         )
-    try:
-        base_model = OpenAIEmbedding(
-            model=model_name,
-            dimensions=embedding_dim,
-            **embedding_kwargs,
-        )
-    except ValueError:
+    if query_prefix or text_prefix:
         base_model = OpenAICompatibleEmbedding(
             model=model_name,
             api_key=embedding_key,
             api_base=embedding_base,
             dimensions=embedding_dim,
+            query_prefix=query_prefix,
+            text_prefix=text_prefix,
         )
+    else:
+        try:
+            base_model = OpenAIEmbedding(
+                model=model_name,
+                dimensions=embedding_dim,
+                **embedding_kwargs,
+            )
+        except ValueError:
+            base_model = OpenAICompatibleEmbedding(
+                model=model_name,
+                api_key=embedding_key,
+                api_base=embedding_base,
+                dimensions=embedding_dim,
+            )
     if embedding_dim > 0:
         return FixedDimensionEmbedding(base_model, embedding_dim)
     return base_model
@@ -1810,25 +1852,14 @@ def _chunk_to_blocks(chunks: List[_GroundingChunk]) -> List[_GroundingBlock]:
                 })()
             ]
 
-        metadata_section_type = str(chunk.metadata.get("section_type") or "").strip()
         metadata_heading_path = chunk.metadata.get("heading_path")
-        metadata_is_list = bool(chunk.metadata.get("is_list_zone"))
-        metadata_is_qa = bool(chunk.metadata.get("is_qa_zone"))
 
         for local_index, block in enumerate(local_blocks):
             block_text = str(block.text or "").strip()
             if not block_text:
                 continue
             section_type = block.section_type
-            heading_path = block.heading_path
-            if metadata_section_type and len(local_blocks) == 1:
-                section_type = metadata_section_type
-                if metadata_heading_path:
-                    heading_path = metadata_heading_path
-            elif metadata_is_list and section_type == "body":
-                section_type = metadata_section_type or "appendix_list"
-            elif metadata_is_qa and section_type == "body":
-                section_type = metadata_section_type or "qa"
+            heading_path = block.heading_path or metadata_heading_path
 
             signature = (section_type, re.sub(r"\s+", "", block_text))
             if signature in seen:
