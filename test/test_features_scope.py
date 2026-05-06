@@ -2,6 +2,9 @@ import datetime
 import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
 from llama_index.core.schema import TextNode, NodeWithScore
+from qdrant_client.http.exceptions import UnexpectedResponse
+
+from app.core import KeywordFilterPostprocessor, _ensure_hybrid_collection, perform_hierarchical_search
 from app.ingest import compute_doc_hash, process_file
 from app.main import _parse_epoch_date
 from app.models import LLMAnalysis
@@ -180,6 +183,140 @@ def test_chat_lod_source_includes_scope(client):
     assert response.status_code == 200
     source = response.json()["sources"][0]
     assert source["scope"] == "reports/lod/2026"
+
+
+def test_health_endpoint(client):
+    response = client.get("/health")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+
+
+def test_keyword_filter_matches_scope_tokens_and_strength_aliases():
+    medium_node = NodeWithScore(
+        node=TextNode(
+            text="agent report chunk",
+            metadata={
+                "filename": "agent_analysis_300037_SZ_20260329_WATCH.md",
+                "keywords": "300037.SZ,新宙邦,电解液",
+                "scope": "agent_report|stock=300037.SZ|signal=WATCH|confidence=2|keywords=WATCH-MEDIUM-300037.SZ-300037",
+            },
+        ),
+        score=0.9,
+    )
+    high_node = NodeWithScore(
+        node=TextNode(
+            text="high conviction agent report chunk",
+            metadata={
+                "filename": "agent_analysis_000000_GROUP_20260401_LONG.md",
+                "scope": "agent_report|stock=000000.GROUP|signal=LONG|confidence=3|keywords=LONG-HIGH-000000.GROUP",
+            },
+        ),
+        score=0.9,
+    )
+
+    assert KeywordFilterPostprocessor({"moderate"}, set())._postprocess_nodes([medium_node])
+    assert KeywordFilterPostprocessor({"strong"}, set())._postprocess_nodes([high_node])
+    assert KeywordFilterPostprocessor({"long"}, set())._postprocess_nodes([high_node])
+    assert KeywordFilterPostprocessor({"weak"}, set())._postprocess_nodes([]) == []
+    assert not KeywordFilterPostprocessor({"weak"}, set())._postprocess_nodes([medium_node])
+
+
+def test_ensure_hybrid_collection_tolerates_concurrent_create_conflict():
+    class RaceClient:
+        def __init__(self):
+            self.exists_calls = 0
+            self.indexes = []
+
+        def collection_exists(self, _collection_name):
+            self.exists_calls += 1
+            return self.exists_calls > 1
+
+        def create_collection(self, **_kwargs):
+            raise UnexpectedResponse(409, "Conflict", b"already exists", {})
+
+        def create_payload_index(self, **kwargs):
+            self.indexes.append(kwargs["field_name"])
+
+    client = RaceClient()
+
+    _ensure_hybrid_collection(client, "race", 1536)
+
+    assert client.indexes == ["date_numeric", "doc_hash", "scope", "filename"]
+
+
+@pytest.mark.asyncio
+async def test_lod_l2_keeps_original_filters():
+    l1_nodes = [
+        NodeWithScore(
+            node=TextNode(
+                text="l1",
+                metadata={
+                    "filename": "same.md",
+                    "scope": "scope-a",
+                    "keywords": "k1",
+                },
+            ),
+            score=0.8,
+        )
+    ]
+
+    class FakeL1Engine:
+        async def aretrieve(self, _query_bundle):
+            return l1_nodes
+
+    class FakeL2Engine:
+        async def aquery(self, _query):
+            return MagicMock(source_nodes=[], __str__=lambda _self: "answer")
+
+    with patch("app.core.get_query_engine", side_effect=[FakeL1Engine(), FakeL2Engine()]) as mock_get:
+        await perform_hierarchical_search(
+            query="test",
+            scope="scope-a",
+            start_date="2026-01-01",
+            end_date="2026-12-31",
+            filename_contains="same",
+            keywords_any=["moderate"],
+            keywords_all=["k1"],
+        )
+
+    l2_kwargs = mock_get.call_args_list[1].kwargs
+    assert l2_kwargs["start_date"] == "2026-01-01"
+    assert l2_kwargs["end_date"] == "2026-12-31"
+    assert l2_kwargs["filename_contains"] == "same"
+    assert l2_kwargs["filenames_in"] == ["same.md"]
+    assert l2_kwargs["scope"] == "scope-a"
+    assert l2_kwargs["keywords_any"] == ["moderate"]
+    assert l2_kwargs["keywords_all"] == ["k1"]
+
+
+@pytest.mark.asyncio
+async def test_lod_l2_uses_scoped_doc_identity_without_scope_filter():
+    l1_nodes = [
+        NodeWithScore(
+            node=TextNode(text="a", metadata={"filename": "same.md", "scope": "scope-a"}),
+            score=0.9,
+        ),
+        NodeWithScore(
+            node=TextNode(text="b", metadata={"filename": "same.md", "scope": "scope-b"}),
+            score=0.8,
+        ),
+    ]
+
+    class FakeL1Engine:
+        async def aretrieve(self, _query_bundle):
+            return l1_nodes
+
+    class FakeL2Engine:
+        async def aquery(self, _query):
+            return MagicMock(source_nodes=[], __str__=lambda _self: "answer")
+
+    with patch("app.core.get_query_engine", side_effect=[FakeL1Engine(), FakeL2Engine()]) as mock_get:
+        await perform_hierarchical_search(query="test", top_docs=1)
+
+    l2_kwargs = mock_get.call_args_list[1].kwargs
+    assert l2_kwargs["filenames_in"] == ["same.md"]
+    assert l2_kwargs["scopes_in"] == ["scope-a"]
 
 
 def test_ingest_scope_dedup_is_scoped(client):

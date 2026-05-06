@@ -5,7 +5,8 @@ import re
 import time
 import datetime
 import asyncio
-from typing import Any, Callable, List, Optional, Tuple
+from dataclasses import dataclass
+from typing import Any, Callable, ClassVar, List, Optional, Tuple
 from urllib.parse import urlparse, urlunparse
 
 import httpx
@@ -29,17 +30,67 @@ from llama_index.vector_stores.qdrant.utils import fastembed_sparse_encoder
 from openai import OpenAI
 from qdrant_client import QdrantClient, AsyncQdrantClient
 from qdrant_client.http import models as qdrant_models
+from qdrant_client.http.exceptions import UnexpectedResponse
 from tenacity import RetryCallState, retry, stop_after_attempt, wait_exponential
 
+from app.models import (
+    GroundingCandidate,
+    GroundingDocumentSelector,
+    GroundingRequest,
+    GroundingResponse,
+    GroundingResult,
+    GroundingDocumentInfo,
+    GroundingExcerpt,
+)
 from app.openai_utils import (
     OpenAICompatibleLLM,
     get_openai_config,
     get_openai_kwargs,
 )
+from app.preprocess import classify_document_block, split_document_blocks
 from app.time_utils import today_in_app_tz
 
 
 logger = logging.getLogger(__name__)
+
+RELATION_KEYWORDS = (
+    "竞争",
+    "替代",
+    "受益",
+    "订单",
+    "客户",
+    "供应链",
+    "产能",
+    "风险",
+    "份额",
+    "进入",
+    "导入",
+)
+
+
+@dataclass(frozen=True)
+class _GroundingChunk:
+    filename: str
+    scope: Optional[str]
+    doc_hash: Optional[str]
+    date: Optional[str]
+    metadata: dict
+    full_text: str
+    original_text: str
+    order_key: tuple
+
+
+@dataclass(frozen=True)
+class _GroundingBlock:
+    filename: str
+    scope: Optional[str]
+    doc_hash: Optional[str]
+    date: Optional[str]
+    section_type: str
+    heading_path: Optional[str]
+    text: str
+    block_index: int
+    chunk_index: int
 
 
 embedding_base, embedding_key = get_openai_config("EMBEDDING")
@@ -54,7 +105,13 @@ RERANK_RETRY_BACKOFF = float(os.getenv("RERANK_RETRY_BACKOFF", "1.5"))
 fastembed_model_name = os.getenv(
     "FASTEMBED_SPARSE_MODEL", "Qdrant/bm42-all-minilm-l6-v2-attentions"
 )
-fastembed_cache_dir = os.getenv("FASTEMBED_CACHE_PATH")
+_default_fastembed_cache_dir = os.path.join(
+    os.path.dirname(os.path.dirname(__file__)),
+    "model_cache",
+)
+fastembed_cache_dir = os.getenv("FASTEMBED_CACHE_PATH") or (
+    _default_fastembed_cache_dir if os.path.isdir(_default_fastembed_cache_dir) else None
+)
 
 
 def _log_rerank_retry(retry_state: RetryCallState) -> None:
@@ -812,19 +869,23 @@ def _ensure_hybrid_collection(
     if client.collection_exists(collection_name):
         pass
     else:
-        client.create_collection(
-            collection_name=collection_name,
-            vectors_config={
-                "text-dense": qdrant_models.VectorParams(
-                    size=vector_size, distance=qdrant_models.Distance.COSINE
-                )
-            },
-            sparse_vectors_config={
-                DEFAULT_SPARSE_VECTOR_NAME: qdrant_models.SparseVectorParams(
-                    index=qdrant_models.SparseIndexParams()
-                )
-            },
-        )
+        try:
+            client.create_collection(
+                collection_name=collection_name,
+                vectors_config={
+                    "text-dense": qdrant_models.VectorParams(
+                        size=vector_size, distance=qdrant_models.Distance.COSINE
+                    )
+                },
+                sparse_vectors_config={
+                    DEFAULT_SPARSE_VECTOR_NAME: qdrant_models.SparseVectorParams(
+                        index=qdrant_models.SparseIndexParams()
+                    )
+                },
+            )
+        except UnexpectedResponse as exc:
+            if exc.status_code != 409 or not client.collection_exists(collection_name):
+                raise
     _ensure_payload_indexes(client, collection_name)
 
 
@@ -1080,6 +1141,7 @@ def get_query_engine(
     time_decay_rate: Optional[float] = None,
     scope: Optional[str] = None,
     filenames_in: Optional[List[str]] = None,
+    scopes_in: Optional[List[str]] = None,
 ):
     filters: Optional[MetadataFilters] = None
     filter_items: List[MetadataFilter] = []
@@ -1124,6 +1186,10 @@ def get_query_engine(
         filter_items.append(
             MetadataFilter(key="scope", value=scope, operator=FilterOperator.EQ)
         )
+    elif scopes_in:
+        filter_items.append(
+            MetadataFilter(key="scope", value=scopes_in, operator=FilterOperator.IN)
+        )
     if filenames_in:
         filter_items.append(
             MetadataFilter(key="filename", value=filenames_in, operator=FilterOperator.IN)
@@ -1143,11 +1209,12 @@ def get_query_engine(
     any_set = {kw.strip().lower() for kw in (keywords_any or []) if kw and kw.strip()}
     all_set = {kw.strip().lower() for kw in (keywords_all or []) if kw and kw.strip()}
 
-    postprocessors: List[BaseNodePostprocessor] = []
+    postprocessors: List[BaseNodePostprocessor] = [
+        ContentFilterPostprocessor(),
+        KeywordFilterPostprocessor(any_set, all_set),
+    ]
     if not skip_rerank:
         postprocessors.append(APIReranker(top_n=rerank_top_n))
-    postprocessors.append(ContentFilterPostprocessor())
-    postprocessors.append(KeywordFilterPostprocessor(any_set, all_set))
     decay = time_decay_rate if time_decay_rate is not None else float(os.getenv("TIME_DECAY_RATE", "0.005"))
     postprocessors.append(TimeDecayPostprocessor(decay_rate=decay))
 
@@ -1209,20 +1276,30 @@ async def perform_hierarchical_search(
         logger.info("L1 search returned 0 nodes")
         return None # Let caller handle empty
 
-    # Aggregate by filename
+    # Aggregate by document identity
     doc_scores = {}
     for node in nodes_l1:
         fname = node.metadata.get("filename")
         if not fname:
             continue
+        node_scope = node.metadata.get("scope")
+        doc_key = (fname, node_scope)
         # Strategy: Max score per doc
         score = node.score or 0.0
-        if fname not in doc_scores or score > doc_scores[fname]:
-            doc_scores[fname] = score
+        if doc_key not in doc_scores or score > doc_scores[doc_key]:
+            doc_scores[doc_key] = score
             
     sorted_docs = sorted(doc_scores.items(), key=lambda x: x[1], reverse=True)
-    top_files = [x[0] for x in sorted_docs[:top_docs]]
-    logger.info("L1 identified top %d docs: %s", len(top_files), top_files)
+    top_doc_keys = [x[0] for x in sorted_docs[:top_docs]]
+    top_files = list(dict.fromkeys(fname for fname, _node_scope in top_doc_keys))
+    selected_scopes = [node_scope for _fname, node_scope in top_doc_keys]
+    top_scopes = [
+        node_scope
+        for node_scope in dict.fromkeys(selected_scopes)
+        if node_scope
+    ]
+    l2_scopes_in = None if scope or not selected_scopes or not all(selected_scopes) else top_scopes
+    logger.info("L1 identified top %d docs: %s", len(top_doc_keys), top_doc_keys)
     
     if not top_files:
         return None
@@ -1231,8 +1308,15 @@ async def perform_hierarchical_search(
     # We restrict search to these files. 
     # We can perform generation here.
     engine_l2 = get_query_engine(
+        start_date=start_date,
+        end_date=end_date,
         filename=None, # We use filenames_in
+        filename_contains=filename_contains,
         filenames_in=top_files,
+        scope=scope,
+        scopes_in=l2_scopes_in,
+        keywords_any=keywords_any,
+        keywords_all=keywords_all,
         skip_rerank=False, # Rerank again within the focused set? Yes, to order chunks for context.
         # We assume L1 rerank was coarse or global. L2 is focused.
         # Actually, if we already reranked in L1, maybe we just use those nodes?
@@ -1325,23 +1409,55 @@ class KeywordFilterPostprocessor(BaseNodePostprocessor):
     _any_set: set[str] = PrivateAttr()
     _all_set: set[str] = PrivateAttr()
 
+    _ALIASES: ClassVar[dict[str, set[str]]] = {
+        "high": {"strong"},
+        "strong": {"high"},
+        "medium": {"moderate"},
+        "moderate": {"medium"},
+        "low": {"weak"},
+        "weak": {"low"},
+    }
+
     def __init__(self, any_set: set[str], all_set: set[str]):
         super().__init__()
         self._any_set = any_set
         self._all_set = all_set
 
+    def _expand_term(self, value: str) -> set[str]:
+        term = value.strip().lower()
+        if not term:
+            return set()
+        return {term, *self._ALIASES.get(term, set())}
+
+    def _add_keyword_value(self, keywords: set[str], value: Any) -> None:
+        if value is None:
+            return
+        text = str(value).strip()
+        if not text:
+            return
+        for term in self._expand_term(text):
+            keywords.add(term)
+        for part in re.split(r"[|=,;\s/_-]+", text):
+            for term in self._expand_term(part):
+                keywords.add(term)
+
     def _normalize_keywords(self, node) -> set[str]:
         metadata = getattr(node, "metadata", {}) or {}
-        keywords = []
+        keywords: set[str] = set()
         raw_list = metadata.get("keyword_list")
         if isinstance(raw_list, list):
-            keywords.extend(raw_list)
+            for item in raw_list:
+                self._add_keyword_value(keywords, item)
         elif isinstance(raw_list, str):
-            keywords.extend(item.strip() for item in raw_list.split(","))
+            for item in raw_list.split(","):
+                self._add_keyword_value(keywords, item)
         raw_str = metadata.get("keywords")
         if isinstance(raw_str, str):
-            keywords.extend(item.strip() for item in raw_str.split(","))
-        return {kw.lower() for kw in keywords if kw and kw.strip()}
+            for item in raw_str.split(","):
+                self._add_keyword_value(keywords, item)
+        self._add_keyword_value(keywords, metadata.get("scope"))
+        self._add_keyword_value(keywords, metadata.get("filename"))
+        return keywords
 
     def _postprocess_nodes(self, nodes: List[NodeWithScore], query_bundle: Optional[QueryBundle] = None) -> List[NodeWithScore]:
         if not self._any_set and not self._all_set:
@@ -1503,6 +1619,497 @@ async def list_all_documents(limit: int = 1000) -> List[dict]:
         list(docs.values()),
         key=lambda item: (item["filename"], item.get("scope") or ""),
     )
+
+
+def _parse_optional_int(value: Any, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _extract_summary_from_full_text(full_text: str) -> str:
+    if not full_text:
+        return ""
+    match = re.search(r"^Summary:\s*(.+)$", full_text, flags=re.MULTILINE)
+    if match:
+        return match.group(1).strip()
+    return ""
+
+
+def _extract_original_text_from_full_text(full_text: str) -> str:
+    if not full_text:
+        return ""
+    marker = "\n---\n"
+    if marker in full_text:
+        return full_text.split(marker, 1)[1].strip()
+    return full_text.strip()
+
+
+def _normalize_grounding_payload(payload: dict) -> tuple[dict, str, str]:
+    metadata = dict(payload or {})
+    full_text = ""
+    raw_node = metadata.get("_node_content")
+    if isinstance(raw_node, str):
+        try:
+            node_data = json.loads(raw_node)
+        except json.JSONDecodeError:
+            node_data = {}
+        node_metadata = node_data.get("metadata")
+        if isinstance(node_metadata, dict):
+            metadata.update(node_metadata)
+        full_text = str(node_data.get("text") or "")
+    original_text = str(metadata.get("original_text") or "")
+    if not original_text:
+        original_text = _extract_original_text_from_full_text(full_text)
+        metadata["original_text"] = original_text
+    if "doc_summary" not in metadata or not metadata.get("doc_summary"):
+        metadata["doc_summary"] = _extract_summary_from_full_text(full_text)
+    return metadata, full_text, original_text
+
+
+def _build_unrestricted_doc_hash_filter(doc_hash: str) -> qdrant_models.Filter:
+    return qdrant_models.Filter(
+        must=[
+            qdrant_models.FieldCondition(
+                key="doc_hash",
+                match=qdrant_models.MatchValue(value=doc_hash),
+            )
+        ]
+    )
+
+
+async def _scroll_points_by_filter(flt: qdrant_models.Filter) -> List[Any]:
+    client = _get_async_client()
+    collection = _get_collection_name()
+    if not collection:
+        return []
+
+    all_points: List[Any] = []
+    offset = None
+    while True:
+        points, next_offset = await client.scroll(
+            collection_name=collection,
+            scroll_filter=flt,
+            with_payload=True,
+            with_vectors=False,
+            limit=256,
+            offset=offset,
+        )
+        if not points:
+            break
+        all_points.extend(points)
+        if next_offset is None:
+            break
+        offset = next_offset
+    return all_points
+
+
+def _selector_scope(selector: GroundingDocumentSelector, request_scope: Optional[str]) -> Optional[str]:
+    selector_scope = selector.scope.strip() if selector.scope else None
+    root_scope = request_scope.strip() if request_scope else None
+    if selector_scope and root_scope and selector_scope != root_scope:
+        raise ValueError("document.scope and request scope do not match")
+    return selector_scope or root_scope
+
+
+async def _resolve_grounding_chunks(
+    selector: GroundingDocumentSelector,
+    request_scope: Optional[str],
+) -> List[_GroundingChunk]:
+    scope = _selector_scope(selector, request_scope)
+    if selector.doc_hash:
+        flt = (
+            _build_scoped_filter(doc_hash=selector.doc_hash, scope=scope)
+            if scope
+            else _build_unrestricted_doc_hash_filter(selector.doc_hash)
+        )
+    else:
+        flt = _build_scoped_filter(filename=selector.filename, scope=scope, doc_hash=None)
+
+    points = await _scroll_points_by_filter(flt)
+    if not points:
+        return []
+
+    grouped: dict[tuple[str, Optional[str]], List[_GroundingChunk]] = {}
+    for order, point in enumerate(points):
+        payload = getattr(point, "payload", None) or {}
+        metadata, full_text, original_text = _normalize_grounding_payload(payload)
+        filename = str(metadata.get("filename") or selector.filename or "")
+        point_scope = metadata.get("scope") or None
+        group_key = (filename, point_scope)
+        grouped.setdefault(group_key, []).append(
+            _GroundingChunk(
+                filename=filename,
+                scope=point_scope,
+                doc_hash=metadata.get("doc_hash"),
+                date=metadata.get("date"),
+                metadata=metadata,
+                full_text=full_text,
+                original_text=original_text,
+                order_key=(
+                    _parse_optional_int(metadata.get("section_order"), order),
+                    _parse_optional_int(metadata.get("block_index"), order),
+                    _parse_optional_int(metadata.get("chunk_index"), order),
+                    order,
+                ),
+            )
+        )
+
+    if len(grouped) > 1:
+        if selector.doc_hash and not scope:
+            raise ValueError(
+                "doc_hash matched multiple scoped documents; provide scope to disambiguate"
+            )
+        if selector.filename and not scope:
+            raise ValueError(
+                "filename matched multiple documents; provide scope or doc_hash to disambiguate"
+            )
+
+    selected = next(iter(grouped.values()))
+    return sorted(selected, key=lambda chunk: chunk.order_key)
+
+
+def _build_document_info(chunks: List[_GroundingChunk]) -> GroundingDocumentInfo:
+    first = chunks[0]
+    summary = ""
+    for chunk in chunks:
+        summary = str(chunk.metadata.get("doc_summary") or "").strip()
+        if summary:
+            break
+        summary = _extract_summary_from_full_text(chunk.full_text)
+        if summary:
+            break
+    return GroundingDocumentInfo(
+        doc_hash=first.doc_hash,
+        filename=first.filename,
+        scope=first.scope,
+        date=first.date,
+        summary=summary,
+        chunk_count=len(chunks),
+    )
+
+
+def _chunk_to_blocks(chunks: List[_GroundingChunk]) -> List[_GroundingBlock]:
+    blocks: List[_GroundingBlock] = []
+    seen: set[tuple[str, str]] = set()
+    for chunk in chunks:
+        local_blocks = split_document_blocks(chunk.original_text, allow_title=False)
+        if not local_blocks:
+            section_type, is_list_zone, is_qa_zone = classify_document_block(
+                chunk.original_text,
+                heading_path=chunk.metadata.get("heading_path"),
+            )
+            local_blocks = [
+                type("FallbackBlock", (), {
+                    "text": chunk.original_text,
+                    "section_type": section_type,
+                    "heading_path": chunk.metadata.get("heading_path"),
+                    "is_list_zone": is_list_zone,
+                    "is_qa_zone": is_qa_zone,
+                })()
+            ]
+
+        metadata_section_type = str(chunk.metadata.get("section_type") or "").strip()
+        metadata_heading_path = chunk.metadata.get("heading_path")
+        metadata_is_list = bool(chunk.metadata.get("is_list_zone"))
+        metadata_is_qa = bool(chunk.metadata.get("is_qa_zone"))
+
+        for local_index, block in enumerate(local_blocks):
+            block_text = str(block.text or "").strip()
+            if not block_text:
+                continue
+            section_type = block.section_type
+            heading_path = block.heading_path
+            if metadata_section_type and len(local_blocks) == 1:
+                section_type = metadata_section_type
+                if metadata_heading_path:
+                    heading_path = metadata_heading_path
+            elif metadata_is_list and section_type == "body":
+                section_type = metadata_section_type or "appendix_list"
+            elif metadata_is_qa and section_type == "body":
+                section_type = metadata_section_type or "qa"
+
+            signature = (section_type, re.sub(r"\s+", "", block_text))
+            if signature in seen:
+                continue
+            seen.add(signature)
+            blocks.append(
+                _GroundingBlock(
+                    filename=chunk.filename,
+                    scope=chunk.scope,
+                    doc_hash=chunk.doc_hash,
+                    date=chunk.date,
+                    section_type=section_type,
+                    heading_path=heading_path,
+                    text=block_text,
+                    block_index=len(blocks),
+                    chunk_index=_parse_optional_int(chunk.metadata.get("chunk_index"), local_index),
+                )
+            )
+    return blocks
+
+
+def _normalized_match_text(text: str) -> str:
+    return re.sub(r"\s+", "", (text or "")).lower()
+
+
+def _candidate_name(candidate: GroundingCandidate) -> str:
+    return candidate.name or candidate.identifier or "unknown"
+
+
+def _candidate_variants(candidate: GroundingCandidate) -> List[str]:
+    values: List[str] = []
+    for raw in [candidate.name, candidate.identifier, *(candidate.aliases or [])]:
+        if not raw:
+            continue
+        text = str(raw).strip()
+        if text and text not in values:
+            values.append(text)
+        if "." in text:
+            code_prefix = text.split(".", 1)[0]
+            if code_prefix and code_prefix not in values:
+                values.append(code_prefix)
+    return values
+
+
+def _variant_hit(text: str, normalized_text: str, variant: str) -> bool:
+    if not variant:
+        return False
+    token = variant.strip()
+    if not token:
+        return False
+    if re.fullmatch(r"\d{6}(?:\.[A-Za-z]{2,4})?", token):
+        pattern = re.compile(rf"(?<!\d){re.escape(token)}(?!\d)", re.IGNORECASE)
+        return bool(pattern.search(text))
+    if token.lower() == token.upper():
+        return token in text or _normalized_match_text(token) in normalized_text
+    return token.lower() in text.lower() or _normalized_match_text(token) in normalized_text
+
+
+def _relation_keyword_hits(text: str) -> int:
+    return sum(1 for keyword in RELATION_KEYWORDS if keyword in text)
+
+
+def _section_weight(section_type: str) -> int:
+    weights = {
+        "title": 5,
+        "body": 4,
+        "qa": 3,
+        "appendix_table": 2,
+        "appendix_list": 1,
+    }
+    return weights.get(section_type, 0)
+
+
+async def _rank_grounding_blocks(
+    candidate: GroundingCandidate,
+    candidate_blocks: List[dict],
+    *,
+    skip_rerank: bool,
+) -> List[dict]:
+    ranked = sorted(
+        candidate_blocks,
+        key=lambda item: (
+            item["base_score"],
+            -item["block"].block_index,
+            -item["block"].chunk_index,
+        ),
+        reverse=True,
+    )
+    if skip_rerank or len(ranked) <= 1:
+        return ranked
+
+    top_n = min(8, len(ranked))
+    nodes = [
+        NodeWithScore(
+            node=TextNode(
+                text=item["block"].text,
+                metadata={
+                    "section_type": item["block"].section_type,
+                    "original_text": item["block"].text,
+                },
+            ),
+            score=float(item["base_score"]),
+        )
+        for item in ranked[:top_n]
+    ]
+    query = " ".join(
+        part for part in [_candidate_name(candidate), *candidate.aliases, "与本文主题的直接相关证据"] if part
+    )
+    reranker = APIReranker(top_n=top_n)
+    try:
+        reranked_nodes = await reranker.apostprocess_nodes(nodes, QueryBundle(query))
+    except Exception as exc:  # pragma: no cover - defensive fallback
+        logger.warning("Grounding rerank failed for candidate=%s: %s", _candidate_name(candidate), exc)
+        return ranked
+
+    score_map = {node.node.get_content(): float(node.score or 0.0) for node in reranked_nodes}
+    for item in ranked:
+        item["final_score"] = score_map.get(item["block"].text, float(item["base_score"]))
+    ranked.sort(
+        key=lambda item: (
+            item.get("final_score", float(item["base_score"])),
+            item["base_score"],
+        ),
+        reverse=True,
+    )
+    return ranked
+
+
+def _compact_text(text: str, limit: int = 220) -> str:
+    collapsed = re.sub(r"\s+", " ", (text or "")).strip()
+    if len(collapsed) <= limit:
+        return collapsed
+    return collapsed[: limit - 1].rstrip() + "…"
+
+
+def _build_candidate_brief(
+    candidate_name: str,
+    tier: str,
+    doc_summary: str,
+    source_reason: str,
+) -> str:
+    doc_summary_text = _compact_text(doc_summary or "该文档")
+    if tier == "body_grounded":
+        return f"本文主旨为{doc_summary_text}。正文明确提到{candidate_name}，{source_reason}"
+    if tier == "relation_grounded":
+        return f"本文主旨为{doc_summary_text}。正文提到{candidate_name}，但主要体现为关系型关联：{source_reason}"
+    if tier == "list_only":
+        return f"本文主旨为{doc_summary_text}。{candidate_name}仅在文末名单或附录中出现，正文无直接展开，属于弱证据候选。"
+    return f"本文主旨为{doc_summary_text}。未在正文或附录中找到{candidate_name}的明确提及。"
+
+
+async def _ground_single_candidate(
+    candidate: GroundingCandidate,
+    blocks: List[_GroundingBlock],
+    doc_summary: str,
+    *,
+    max_excerpts: int,
+    skip_rerank: bool,
+) -> GroundingResult:
+    candidate_name = _candidate_name(candidate)
+    variants = _candidate_variants(candidate)
+    candidate_blocks: List[dict] = []
+    body_hit_count = 0
+    qa_hit_count = 0
+    list_hit_count = 0
+    title_hit_count = 0
+    relation_hits = 0
+
+    for block in blocks:
+        text = block.text
+        normalized = _normalized_match_text(text)
+        matched_variants = [variant for variant in variants if _variant_hit(text, normalized, variant)]
+        if not matched_variants:
+            continue
+
+        keyword_hits = _relation_keyword_hits(text)
+        if block.section_type in {"title", "body"}:
+            if block.section_type == "title":
+                title_hit_count += 1
+            else:
+                body_hit_count += 1
+        elif block.section_type == "qa":
+            qa_hit_count += 1
+        elif block.section_type in {"appendix_list", "appendix_table"}:
+            list_hit_count += 1
+        relation_hits += keyword_hits
+
+        candidate_blocks.append(
+            {
+                "block": block,
+                "matched_variants": matched_variants,
+                "is_alias_hit": bool(matched_variants),
+                "base_score": (
+                    _section_weight(block.section_type) * 100
+                    + min(keyword_hits, 5) * 10
+                    + min(len(matched_variants), 3) * 5
+                ),
+            }
+        )
+
+    if not candidate_blocks:
+        return GroundingResult(
+            identifier=candidate.identifier,
+            name=candidate_name,
+            relevance_tier="not_found",
+            source_zone="not_found",
+            source_reason="文档中未找到该资产的显式提及。",
+            candidate_brief=_build_candidate_brief(
+                candidate_name,
+                "not_found",
+                doc_summary,
+                "文档中未找到该资产的显式提及。",
+            ),
+        )
+
+    has_non_list = any(item["block"].section_type in {"title", "body", "qa"} for item in candidate_blocks)
+    if has_non_list:
+        tier = "body_grounded" if (title_hit_count or body_hit_count >= 2 or relation_hits > 0) else "relation_grounded"
+        source_candidates = [
+            item for item in candidate_blocks if item["block"].section_type in {"title", "body", "qa"}
+        ]
+        source_reason = (
+            "正文存在显式提及，并伴随竞争、供应链、订单或风险等关系论述。"
+            if tier == "body_grounded"
+            else "正文存在显式提及，但论述更偏关系映射或轻度展开。"
+        )
+    else:
+        tier = "list_only"
+        source_candidates = [
+            item for item in candidate_blocks if item["block"].section_type in {"appendix_list", "appendix_table"}
+        ]
+        source_reason = "仅在文末名单或附录中出现，正文未找到直接论据。"
+
+    ranked = await _rank_grounding_blocks(candidate, source_candidates, skip_rerank=skip_rerank)
+    top_excerpts = ranked[:max_excerpts]
+    source_zone = top_excerpts[0]["block"].section_type if top_excerpts else "not_found"
+    excerpts = [
+        GroundingExcerpt(
+            section_type=item["block"].section_type,
+            score=round(float(item.get("final_score", item["base_score"])), 4),
+            text=_compact_text(item["block"].text, limit=320),
+            is_alias_hit=bool(item["is_alias_hit"]),
+        )
+        for item in top_excerpts
+    ]
+    return GroundingResult(
+        identifier=candidate.identifier,
+        name=candidate_name,
+        relevance_tier=tier,
+        source_zone=source_zone,
+        source_reason=source_reason,
+        body_hit_count=body_hit_count + title_hit_count,
+        qa_hit_count=qa_hit_count,
+        list_hit_count=list_hit_count,
+        candidate_brief=_build_candidate_brief(candidate_name, tier, doc_summary, source_reason),
+        excerpts=excerpts,
+    )
+
+
+async def run_grounding_query(
+    request: GroundingRequest,
+) -> GroundingResponse:
+    chunks = await _resolve_grounding_chunks(request.document, request.scope)
+    if not chunks:
+        raise LookupError("document not found")
+
+    document = _build_document_info(chunks)
+    blocks = _chunk_to_blocks(chunks)
+    candidate_results: List[GroundingResult] = []
+    for candidate in request.candidates:
+        candidate_results.append(
+            await _ground_single_candidate(
+                candidate,
+                blocks,
+                document.summary,
+                max_excerpts=request.max_excerpts,
+                skip_rerank=request.skip_rerank,
+            )
+        )
+
+    return GroundingResponse(document=document, candidate_results=candidate_results)
 
 
 async def shutdown_resources() -> None:

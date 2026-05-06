@@ -11,6 +11,10 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+MODEL_CACHE_DIR = PROJECT_ROOT / "model_cache"
+if MODEL_CACHE_DIR.exists():
+    os.environ.setdefault("FASTEMBED_CACHE_PATH", str(MODEL_CACHE_DIR))
+
 # 1. 纯净加载 .env，不做任何 Qdrant Host 的硬编码干扰
 load_dotenv(override=True)
 

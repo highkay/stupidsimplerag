@@ -11,6 +11,7 @@ from llama_index.core.schema import TextNode
 
 from app.models import LLMAnalysis
 from app.openai_utils import OpenAICompatibleLLM, get_openai_kwargs
+from app.preprocess import split_document_blocks
 from app.utils import extract_date_from_filename
 
 logger = logging.getLogger(__name__)
@@ -64,12 +65,13 @@ async def analyze_document(text: str) -> LLMAnalysis:
     prompt = f"""
 你是一名资深金融分析师，负责将原始 Markdown 片段转化为检索用的富语义数据。请严格按照下列 JSON 结构输出（禁止额外文本或 Markdown 代码块）：
 {{
-  "summary": "<<=60字的中文摘要，突出业绩、风险或政策变化>",
+  "summary": "<120-220字的中文文档摘要，概括主旨、核心判断、风险或分歧点；若存在文末名单/附录可简要指出>",
   "table_narrative": "<将表格/数值转写成自然语言，若无表格留空字符串>",
   "keywords": ["<股票代码或公司名>", "<行业关键词>", "...至多8个唯一关键词"]
 }}
 要求：
 - 使用中文输出，保持数值/单位原样。
+- summary 优先写成可复用的文档级摘要，不要只写一句标题复述。
 - keywords 必须是字符串数组，含 ticker、机构简称、行业术语，避免重复。
 - 若无法提取信息，字段填空字符串，keywords 为空数组。
 
@@ -185,9 +187,12 @@ async def process_file(
 
     keywords = analysis.keywords
     keywords_str = ",".join(keywords)
+    doc_summary = (analysis.summary or "").strip()
+    if not doc_summary:
+        doc_summary = content.strip().replace("\n", " ")[:180]
     header_text = (
         f"Date: {meta_date}\n"
-        f"Summary: {analysis.summary}\n"
+        f"Summary: {doc_summary}\n"
         f"Key Data: {analysis.table_narrative}\n"
         f"Tags: {keywords_str}\n"
         f"---\n"
@@ -212,6 +217,7 @@ async def process_file(
         chunk_size,
         chunk_overlap,
     )
+    chunk_index = 0
     for idx, chunk in enumerate(chunker(content)):
         chunk_text = getattr(chunk, "text", str(chunk))
         chunk_len = len(chunk_text)
@@ -221,14 +227,32 @@ async def process_file(
         if chunk_len > max_chunk_len:
             max_chunk_len = chunk_len
         full_text = f"{header_text}{chunk_text}"
+        local_blocks = split_document_blocks(chunk_text, allow_title=False)
+        dominant_block = max(
+            local_blocks,
+            key=lambda block: (len(block.text), int(block.section_type == "body")),
+            default=None,
+        )
+        section_type = dominant_block.section_type if dominant_block else "body"
+        heading_path = dominant_block.heading_path if dominant_block else None
+        is_list_zone = any(block.is_list_zone for block in local_blocks)
+        is_qa_zone = any(block.is_qa_zone for block in local_blocks)
         node_metadata = {
             "filename": filename,
             "date": meta_date,
             "date_numeric": meta_date_numeric,
             "doc_hash": doc_hash,
+            "doc_summary": doc_summary,
             "keywords": keywords_str,
             "keyword_list": keywords,
             "original_text": chunk_text,
+            "section_type": section_type,
+            "section_order": idx,
+            "block_index": idx,
+            "chunk_index": chunk_index,
+            "heading_path": heading_path,
+            "is_list_zone": is_list_zone,
+            "is_qa_zone": is_qa_zone,
         }
         if scope:
             node_metadata["scope"] = scope
@@ -242,6 +266,7 @@ async def process_file(
         hash_base = f"{doc_hash or filename}|{scope or ''}"
         node.id_ = hashlib.md5(f"{hash_base}_{idx}".encode()).hexdigest()
         nodes.append(node)
+        chunk_index += 1
     if nodes:
         avg_len = total_chars / len(nodes)
         logger.debug(

@@ -73,14 +73,20 @@ def _reset_collection(client: QdrantClient, collection: str, dim: int) -> None:
             )
         },
     )
-    try:
-        client.create_payload_index(
-            collection_name=collection,
-            field_name="date_numeric",
-            field_schema=qmodels.PayloadSchemaType.INTEGER,
-        )
-    except Exception:
-        pass
+    for field_name, field_schema in (
+        ("date_numeric", qmodels.PayloadSchemaType.INTEGER),
+        ("doc_hash", qmodels.PayloadSchemaType.KEYWORD),
+        ("scope", qmodels.PayloadSchemaType.KEYWORD),
+        ("filename", qmodels.PayloadSchemaType.KEYWORD),
+    ):
+        try:
+            client.create_payload_index(
+                collection_name=collection,
+                field_name=field_name,
+                field_schema=field_schema,
+            )
+        except Exception:
+            pass
     logger.info("Collection reset complete: %s", collection)
 
 

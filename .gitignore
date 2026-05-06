@@ -1,4 +1,5 @@
-model_cache
+model_cache/*
+!model_cache/.keep
 qdrant_data
 .env
 __pycache__

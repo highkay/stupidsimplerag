@@ -1,0 +1,17 @@
+.ace-tool
+.git
+.github
+.pytest_cache
+.venv
+.venv-*
+__pycache__
+*.py[cod]
+
+.env
+.env.*
+!.env.example
+
+qdrant_data
+model_cache/.locks
+logs
+tmp

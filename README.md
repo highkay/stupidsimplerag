@@ -58,6 +58,12 @@ uvicorn app.main:app --reload
 
 ## HTTP API
 
+### 健康检查
+
+| Endpoint | Method | 说明 |
+| --- | --- | --- |
+| `/health` | `GET` | 轻量存活检查，供容器健康检查与负载均衡探测使用 |
+
 ### 入库
 
 | Endpoint | Method | 说明 |
@@ -88,8 +94,38 @@ uvicorn app.main:app --reload
 
 | Endpoint | Method | 说明 |
 | --- | --- | --- |
+| `/grounding/query` | `POST` | 单文档、多候选项的结构化 grounding，返回可直接消费的证据包 |
 | `/chat` | `POST` | 标准检索 + 可选生成 |
-| `/chat/lod` | `POST` | 两阶段 LOD 检索（先选文档，再聚焦生成，支持 `filename`/`filename_contains` 过滤） |
+| `/chat/lod` | `POST` | 两阶段 LOD 检索（先选文档，再聚焦生成，过滤维度与 `/chat` 对齐） |
+
+`/grounding/query` 请求体：
+
+```json
+{
+  "document": {
+    "doc_hash": "optional-doc-hash",
+    "filename": "optional.md",
+    "scope": "reports/2025"
+  },
+  "candidates": [
+    {
+      "identifier": "002475.SZ",
+      "name": "立讯精密",
+      "aliases": ["立讯"],
+      "candidate_type": "stock"
+    }
+  ],
+  "max_excerpts": 3,
+  "skip_rerank": false
+}
+```
+
+`/grounding/query` 说明：
+
+- 与 `/chat` 独立，不返回自然语言问答，只返回结构化证据。
+- 文档定位优先级：`doc_hash + scope` -> `doc_hash` -> `filename + scope`。
+- 响应包含 `document` 与 `candidate_results[]`，后者含 `relevance_tier`、`source_zone`、`source_reason`、`excerpts`、`candidate_brief`。
+- 当前支持 `body_grounded`、`relation_grounded`、`list_only`、`not_found` 四类相关性层级。
 
 `/chat` 支持字段：
 
@@ -97,7 +133,7 @@ uvicorn app.main:app --reload
 - `start_date` / `end_date`
 - `filename`（精确匹配）
 - `filename_contains`（不区分大小写模糊匹配）
-- `keywords_any` / `keywords_all`
+- `keywords_any` / `keywords_all`（匹配 `keywords/keyword_list`，也匹配 `scope`、`filename` 中的标签 token；`strong/moderate/weak` 兼容 `high/medium/low`）
 - `scope`
 - `skip_rerank`（跳过重排）
 - `skip_generation`（仅返回切片，不调用生成）
@@ -146,10 +182,14 @@ curl -X POST http://localhost:8000/chat \
 - 节点 ID 使用 `md5(doc_hash + scope + chunk_idx)`，避免跨 scope 冲突。
 - `scope` 参与文档身份；同内容可在不同 scope 中并存。
 
+1.1 grounding metadata
+- `process_file()` 会额外写入 `doc_summary`、`section_type`、`section_order`、`block_index`、`chunk_index`、`heading_path`、`is_list_zone`、`is_qa_zone`。
+- 这些字段服务于 `/grounding/query`，不会改变 `/chat` 与 `/chat/lod` 的请求/响应合同。
+
 2. 检索后处理顺序
-- `APIReranker`（可跳过）
 - `ContentFilterPostprocessor`
 - `KeywordFilterPostprocessor`
+- `APIReranker`（可跳过）
 - `TimeDecayPostprocessor`
 
 3. Rerank 协议兼容
@@ -210,6 +250,7 @@ curl -X POST http://localhost:8000/chat \
 2. `reset_qdrant.py`
 - 删除并重建集合（危险操作）。
 - 默认会交互确认；`-y` 跳过确认。
+- 重建后会创建 `date_numeric`、`doc_hash`、`scope`、`filename` payload index。
 
 3. `preload_models.py`
 - 提前下载 FastEmbed 稀疏模型到 `FASTEMBED_CACHE_PATH`。
@@ -224,6 +265,7 @@ pytest -q
 
 - `test/test_features_scope.py`：Mock 测试（scope 透传、LOD 路由）。
 - `test/test_features_scope.py` 额外覆盖 scope 去重、文档列表与 scoped 删除行为。
+- `test/test_grounding.py`：独立 grounding 路由、分类结果与新 metadata 测试。
 - `test/test_offline_ingest.py`：离线批量入库脚本的批次结果处理测试。
 - `test/test_api.py`：真实链路测试（依赖可用的 LLM/Embedding/Qdrant）。
 
@@ -232,8 +274,10 @@ pytest -q
 ## Docker 与 CI
 
 - Dockerfile 使用 `python:3.13-slim`，启动命令为 Gunicorn + Uvicorn worker。
+- Dockerfile 构建层依赖 BuildKit cache mount 复用 `apt`、`pip` 与 FastEmbed 缓存；推荐本地构建时启用 `DOCKER_BUILDKIT=1`。
+- Docker 镜像内置 `HEALTHCHECK`，探测 `GET /health`。
 - 镜像内默认 `TZ=Asia/Shanghai`，并安装 `tzdata`；`docker-compose` 同步为 `api`/`qdrant` 注入 `TZ`。
-- 镜像构建阶段会执行 `preload_models.py` 预热 BM42。
+- 镜像构建阶段会优先复制本地 `model_cache`，再默认执行 `preload_models.py` 校验/补齐 BM42；临时快速构建可传 `--build-arg PRELOAD_FASTEMBED=0` 跳过。
 - GitHub Actions（`.github/workflows/docker-publish.yml`）在 `main` 相关文件变更时自动推送镜像：
   - `highkay/stupidsimplerag:latest`
   - `highkay/stupidsimplerag:<commit_sha>`

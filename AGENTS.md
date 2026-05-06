@@ -34,23 +34,27 @@
   - 初始化日志桥接（`configure_logging`）。
 
 - `app/main.py`
-  - API 路由：`/ingest`、`/ingest/batch`、`/ingest/text`、`/chat`、`/chat/lod`、`/documents`。
+  - API 路由：`/health`、`/ingest`、`/ingest/batch`、`/ingest/text`、`/grounding/query`、`/chat`、`/chat/lod`、`/documents`。
   - UI 路由：`/`、`/ui/upload`、`/ui/upload/batch`、`/ui/chat`、`/ui/documents`。
   - 关键行为：缓存键构造、重试策略、成功入库后缓存失效、`scope` 归一化、按 `(filename, scope)` 删除重建、HTMX 入口。
 
 - `app/ingest.py`
   - `compute_doc_hash(content)`（SHA256）。
   - `analyze_document()`：LLM 返回 `LLMAnalysis`。
-  - `process_file()`：切片并写 metadata。
+  - `process_file()`：切片并写 metadata（含 grounding 所需文档摘要与区域标签）。
 
 - `app/core.py`
   - Embedding 封装（OpenAI 原生 + fallback 到兼容 REST）。
   - `APIReranker`（双协议 + 重试 + 同步/异步）。
   - `get_query_engine()`：统一组装过滤器与后处理器链。
   - Qdrant 文档管理：`adoc_exists`、`delete_nodes_by_filename`、`list_all_documents`。
+  - 独立 grounding 查询：单文档 chunks 拉取、候选项命中分类、可选 rerank 精排。
 
 - `app/models.py`
-  - `ChatRequest` / `ChatResponse` / `IngestResponse` / `DocumentInfo` / `TextIngestRequest` / `LLMAnalysis`。
+  - `ChatRequest` / `ChatResponse` / `IngestResponse` / `DocumentInfo` / `TextIngestRequest` / `LLMAnalysis` / `Grounding*`。
+
+- `app/preprocess.py`
+  - 文档分区 helper：确定性切分 `title/body/qa/appendix_list/appendix_table`。
 
 - `app/openai_utils.py`
   - API key/base 分派逻辑。
@@ -63,11 +67,17 @@
 - 运维脚本
   - `offline_ingest.py`：离线递归入库与进度跟踪。
   - `reset_qdrant.py`：危险重置集合。
-  - `preload_models.py`：预下载 FastEmbed 稀疏模型。
+- `preload_models.py`：预下载 FastEmbed 稀疏模型。
+- `Dockerfile`：使用 BuildKit cache mount 缓存 `apt`、`pip` 与 FastEmbed 构建依赖，并可用本地 `model_cache` 加速模型预热。
 
 ## 4. API 合同（当前实现）
 
-### 4.1 入库
+### 4.1 健康检查
+
+1. `GET /health`
+- 轻量存活检查，仅返回 `{"status": "ok"}`，供 Docker healthcheck / 负载均衡探测使用。
+
+### 4.2 入库
 
 1. `POST /ingest`
 - `multipart/form-data`：`file` + 可选 `force_update`、`scope`。
@@ -95,19 +105,26 @@
 }
 ```
 
-### 4.2 查询
+### 4.3 查询
+
+1. `POST /grounding/query`
+- 独立于 `/chat` 的结构化 grounding API。
+- 输入：单篇文档选择器（`doc_hash` 优先，或 `filename + scope`）+ 一组 `candidates[]`。
+- 输出：文档摘要、逐候选项 `relevance_tier/source_zone/source_reason/excerpts/candidate_brief`。
+- `skip_rerank=true` 时仍可完全工作。
 
 1. `POST /chat`
 - 过滤维度：日期范围、filename 精确、filename_contains 模糊、`keywords_any/all`、`scope`。
+- `keywords_any/all` 匹配 `keywords/keyword_list`，也匹配 `scope`、`filename` 中的标签 token；`strong/moderate/weak` 兼容 `high/medium/low`。
 - `skip_rerank`：跳过重排。
 - `skip_generation`：只跑检索，回答由切片拼接兜底。
 
 2. `POST /chat/lod`
 - 两阶段：L1 选 Top 文档 -> L2 仅在这些文档中检索并生成。
-- 过滤维度与 `/chat` 对齐：支持 `filename` 与 `filename_contains`。
+- 过滤维度与 `/chat` 对齐：L2 会保留日期、filename、filename_contains、keywords 与 scope 过滤。
 - 当前不接入缓存。
 
-### 4.3 文档管理
+### 4.4 文档管理
 
 - `GET /documents`：按 `(filename, scope)` 聚合并返回 chunk 数。
 - `DELETE /documents/{filename}`：支持可选查询参数 `scope`；未传时仅删除无 scope 文档，并清缓存。
@@ -122,11 +139,12 @@
 - `filename_contains` 文本匹配（不区分大小写）
 - `scope` 精确匹配
 - `filenames_in`（LOD 二阶段）
+- `scopes_in`（LOD 二阶段内部使用）
 
 2. Postprocessor 链（按顺序）
-- `APIReranker`（可跳过）
 - `ContentFilterPostprocessor`
 - `KeywordFilterPostprocessor`
+- `APIReranker`（可跳过）
 - `TimeDecayPostprocessor`
 
 ## 6. Metadata 约束（切片入库）
@@ -137,9 +155,17 @@
 - `date`（`YYYY-MM-DD`）
 - `date_numeric`（`YYYYMMDD` 整数）
 - `doc_hash`
+- `doc_summary`
 - `keywords`（逗号拼接）
 - `keyword_list`（数组）
 - `original_text`
+- `section_type`
+- `section_order`
+- `block_index`
+- `chunk_index`
+- `heading_path`
+- `is_list_zone`
+- `is_qa_zone`
 - `scope`（可选）
 
 补充：`_node_to_source()` 会从节点 metadata 显式回填 `scope` 到 `SourceItem.scope`；
@@ -181,6 +207,7 @@
 ## 8. 测试现状
 
 - `test/test_features_scope.py`：mock 测试（scope 与 LOD 路由行为）。
+- `test/test_grounding.py`：grounding 请求/响应与新 metadata 测试。
 - `test/test_offline_ingest.py`：离线批量入库脚本的批次结果处理测试。
 - `test/test_api.py`：真实链路测试（依赖外部模型服务与 Qdrant）。
 - `test/conftest.py`：测试时集合名覆盖为 `pytest_integration_test`。
@@ -200,4 +227,5 @@
 1. 改检索链路：确认 `/chat` 与 `/chat/lod` 行为一致性。
 2. 改入库链路：确认 `force_update`、`doc_hash` 去重、缓存清理未回归。
 3. 改过滤逻辑：补 `keywords_any/all`、`scope` 相关测试，并确认文档管理接口仍按 `(filename, scope)` 安全工作。
-4. 改配置项：补 `.env.example` 与 README 对应说明。
+4. 改 grounding：确认 `/grounding/query` 仍独立于 `/chat`，并覆盖 `body_grounded / relation_grounded / list_only / not_found`。
+5. 改配置项：补 `.env.example` 与 README 对应说明。

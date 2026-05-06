@@ -19,6 +19,7 @@ from llama_index.core import QueryBundle
 from llama_index.core.schema import TextNode
 from app.core import (
     adoc_exists,
+    run_grounding_query,
     get_collection_metrics,
     get_query_engine,
     insert_nodes,
@@ -29,6 +30,8 @@ from app.core import (
 )
 from app.ingest import compute_doc_hash, process_file
 from app.models import (
+    GroundingRequest,
+    GroundingResponse,
     ChatRequest,
     ChatResponse,
     IngestResponse,
@@ -64,6 +67,11 @@ INSERT_MAX_RETRIES = max(1, int(os.getenv("INGEST_INSERT_MAX_RETRIES", "3")))
 INSERT_RETRY_BACKOFF = float(os.getenv("INGEST_INSERT_RETRY_BACKOFF", "2.0"))
 QUERY_MAX_RETRIES = max(1, int(os.getenv("QUERY_MAX_RETRIES", "3")))
 QUERY_RETRY_BACKOFF = float(os.getenv("QUERY_RETRY_BACKOFF", "2.0"))
+
+
+@app.get("/health")
+async def health_check() -> Dict[str, str]:
+    return {"status": "ok"}
 
 
 def _log_query_retry(retry_state: RetryCallState) -> None:
@@ -559,6 +567,7 @@ async def ingest_text_api(request: Request, body: TextIngestRequest) -> IngestRe
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat_api(req: ChatRequest) -> ChatResponse:
+    started_at = time.perf_counter()
     logger.info(
         "Chat request query=%r start=%s end=%s filename=%s contains=%s any=%s all=%s scope=%s",
         req.query,
@@ -573,7 +582,8 @@ async def chat_api(req: ChatRequest) -> ChatResponse:
     key = _cache_key(req)
     if key in CACHE:
         cached = CACHE[key]
-        logger.info("Cache hit for query hash=%s", key)
+        elapsed_ms = int((time.perf_counter() - started_at) * 1000)
+        logger.info("Cache hit for query hash=%s elapsed_ms=%d", key, elapsed_ms)
         return ChatResponse(**cached)
 
     engine = get_query_engine(
@@ -637,13 +647,24 @@ async def chat_api(req: ChatRequest) -> ChatResponse:
     CACHE[key] = result_payload
     top_filenames = [item["filename"] for item in result_payload["sources"]]
     logger.info(
-        "Chat response final_nodes=%d returned=%d top_files=%s answer_len=%d",
+        "Chat response final_nodes=%d returned=%d top_files=%s answer_len=%d elapsed_ms=%d",
         len(source_nodes),
         len(result_nodes),
         top_filenames,
         len(result_payload["answer"]),
+        int((time.perf_counter() - started_at) * 1000),
     )
     return ChatResponse(**result_payload)
+
+
+@app.post("/grounding/query", response_model=GroundingResponse)
+async def grounding_api(req: GroundingRequest) -> GroundingResponse:
+    try:
+        return await run_grounding_query(req)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.post("/chat/lod", response_model=ChatResponse)
@@ -653,6 +674,7 @@ async def chat_lod_api(req: ChatRequest) -> ChatResponse:
     L1: Retrieve broad candidates & identify top documents.
     L2: Focus generation on those top documents.
     """
+    started_at = time.perf_counter()
     logger.info("LOD Chat request query=%r scope=%s", req.query, req.scope)
     
     # We don't cache LOD requests yet, or we can reuse CACHE but with a different key prefix?
@@ -674,6 +696,11 @@ async def chat_lod_api(req: ChatRequest) -> ChatResponse:
         raise HTTPException(status_code=500, detail=str(exc))
         
     if not response:
+        logger.info(
+            "LOD Chat response final_nodes=0 returned=0 answer_len=%d elapsed_ms=%d",
+            len("No relevant documents found in L1 search."),
+            int((time.perf_counter() - started_at) * 1000),
+        )
         return ChatResponse(answer="No relevant documents found in L1 search.", sources=[])
         
     source_nodes = getattr(response, "source_nodes", []) or []
@@ -686,6 +713,13 @@ async def chat_lod_api(req: ChatRequest) -> ChatResponse:
         "answer": response_answer,
         "sources": [_node_to_source(node).model_dump() for node in result_nodes],
     }
+    logger.info(
+        "LOD Chat response final_nodes=%d returned=%d answer_len=%d elapsed_ms=%d",
+        len(source_nodes),
+        len(result_nodes),
+        len(result_payload["answer"]),
+        int((time.perf_counter() - started_at) * 1000),
+    )
     return ChatResponse(**result_payload)
 
 
