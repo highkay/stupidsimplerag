@@ -21,6 +21,8 @@ services:
       - "${EMBEDDING_CONTEXT_WINDOW:-8192}"
       - -ub
       - "${EMBEDDING_UBATCH:-1024}"
+      - -tb
+      - "${EMBEDDING_THREADS_BATCH:-8}"
       - --host
       - 0.0.0.0
       - --port

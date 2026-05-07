@@ -73,6 +73,7 @@ Vulkan 模式要求宿主机可用 `/dev/dri`，并且容器需加入 `video` gr
 - `EMBEDDING_QUERY_PREFIX=Query:`
 - `EMBEDDING_DOCUMENT_PREFIX=Document:`
 - `EMBEDDING_UBATCH=1024`（默认推荐值）
+- `EMBEDDING_THREADS_BATCH=8`（当前推荐值）
 
 注意：从 `768` 维模型切到 `1024` 维时，必须迁移到新 Qdrant 集合后再回灌，不能直接复用旧 dense 向量集合。
 
@@ -335,9 +336,10 @@ pytest -q
 - `EMBEDDING_TIMEOUT=60`
 - `INSERT_BATCH_SIZE=8`
 - `EMBEDDING_UBATCH=1024`
+- `EMBEDDING_THREADS_BATCH=8`
 
 这样可以避免大文档入库时单次 `/v1/embeddings` 请求超过客户端超时，导致 `/ingest` 或 `/ingest/text` 返回 `500`。
-在 `192.168.1.11` 上的同口径 Vulkan 对照里，`ubatch=1024` 相比 `2048` 同时降低了平均时延和 CPU 峰值，因此当前默认值已从 `2048` 调整为 `1024`。
+在 `192.168.1.11` 上的同口径 Vulkan 对照里，`ubatch=1024` 相比 `2048` 同时降低了平均时延和 CPU 峰值；在相同 `ubatch=1024` 下，再显式设置 `threads-batch=8` 也带来了小幅时延改善和更低的平均 CPU 占用，因此当前默认值已调整为 `ubatch=1024`、`threads-batch=8`。
 
 ## 离线回填
 
