@@ -20,7 +20,7 @@ services:
       - -c
       - "${EMBEDDING_CONTEXT_WINDOW:-8192}"
       - -ub
-      - "${EMBEDDING_UBATCH:-2048}"
+      - "${EMBEDDING_UBATCH:-1024}"
       - --host
       - 0.0.0.0
       - --port
