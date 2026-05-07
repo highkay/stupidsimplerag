@@ -60,7 +60,7 @@
 - `app/openai_utils.py`
   - API key/base 分派逻辑。
   - `OpenAICompatibleLLM` 支持多模型逗号轮询。
-  - `build_llm()` / `GatewayRoutedLLM` 支持 `chat` / `ingest` purpose 分池、权重、least-inflight 与熔断。
+  - `build_llm()` / `GatewayRoutedLLM` 支持 `chat` / `ingest` purpose 分池、权重、least-inflight、熔断，以及可选的 scheduler（全局并发预算 / 预留槽位 / 自适应 pool limit）。
 
 - `app/utils.py`
   - 文件名日期提取：时间戳、`YYYYMMDD`、`MMDD`、两位年份兜底。

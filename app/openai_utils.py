@@ -135,9 +135,25 @@ class LLMPoolConfig(BaseModel):
     acquire_timeout_s: float = Field(default=5.0, gt=0)
 
 
+class LLMAdaptivePoolConfig(BaseModel):
+    enabled: bool = False
+    min_inflight: int = Field(default=1, ge=1)
+    max_inflight: Optional[int] = Field(default=None, ge=1)
+    increase_every: int = Field(default=8, ge=1)
+    latency_threshold_ms: float = Field(default=30000.0, gt=0)
+    decrease_step: int = Field(default=1, ge=1)
+
+
+class LLMRouterSchedulerConfig(BaseModel):
+    global_max_inflight: Optional[int] = Field(default=None, ge=1)
+    reserved_by_purpose: Dict[str, int] = Field(default_factory=dict)
+    adaptive_by_purpose: Dict[str, LLMAdaptivePoolConfig] = Field(default_factory=dict)
+
+
 class LLMRouterConfig(BaseModel):
     deployments: List[LLMDeploymentConfig] = Field(default_factory=list)
     pools: Dict[str, LLMPoolConfig] = Field(default_factory=dict)
+    scheduler: LLMRouterSchedulerConfig = Field(default_factory=LLMRouterSchedulerConfig)
 
     @model_validator(mode="after")
     def validate_config(self):
@@ -169,6 +185,22 @@ class LLMRouterConfig(BaseModel):
                 raise ValueError(
                     f"llm router pool {pool_name!r} references unknown deployments: {', '.join(sorted(unknown))}"
                 )
+
+        for purpose, reserved in self.scheduler.reserved_by_purpose.items():
+            if purpose not in self.pools:
+                raise ValueError(f"llm router scheduler reserved_by_purpose references unknown pool {purpose!r}")
+            if reserved < 0:
+                raise ValueError(f"llm router scheduler reserved_by_purpose[{purpose!r}] must be >= 0")
+
+        for purpose, adaptive in self.scheduler.adaptive_by_purpose.items():
+            if purpose not in self.pools:
+                raise ValueError(f"llm router scheduler adaptive_by_purpose references unknown pool {purpose!r}")
+            pool = self.pools[purpose]
+            ceiling = adaptive.max_inflight or pool.max_inflight
+            if adaptive.min_inflight > ceiling:
+                raise ValueError(
+                    f"llm router adaptive pool {purpose!r} min_inflight={adaptive.min_inflight} exceeds ceiling={ceiling}"
+                )
         return self
 
 
@@ -190,6 +222,8 @@ class _DeploymentRuntimeState:
 @dataclass
 class _PoolRuntimeState:
     inflight: int = 0
+    adaptive_limit: Optional[int] = None
+    adaptive_success_streak: int = 0
 
 
 @dataclass
@@ -232,6 +266,9 @@ class LLMRouterRuntime:
         self._lock = threading.Lock()
         self._stats_interval = max(0, int(os.getenv("LLM_ROUTER_STATS_INTERVAL", "20")))
         self._stats_events = 0
+        for pool_name, adaptive in config.scheduler.adaptive_by_purpose.items():
+            if adaptive.enabled:
+                self._pool_states[pool_name].adaptive_limit = adaptive.min_inflight
 
     @property
     def deployments(self) -> Dict[str, LLMDeploymentConfig]:
@@ -299,6 +336,7 @@ class LLMRouterRuntime:
                     state.circuit_state = "closed"
                     state.half_open_successes = 0
                     state.opened_until = 0.0
+            self._adjust_pool_after_success_locked(lease.pool_name, latency_ms)
             self._stats_events += 1
             self._maybe_log_pool_stats_locked(lease.pool_name)
 
@@ -338,6 +376,7 @@ class LLMRouterRuntime:
                     deployment.cooldown_s,
                     exc,
                 )
+            self._adjust_pool_after_failure_locked(lease.pool_name, retryable=retryable, exc=exc)
             self._stats_events += 1
             self._maybe_log_pool_stats_locked(lease.pool_name)
 
@@ -350,7 +389,10 @@ class LLMRouterRuntime:
     def _try_acquire_locked(self, pool_name: str, exclude: set[str]) -> Optional[_RouterLease]:
         pool = self.config.pools[pool_name]
         pool_state = self._pool_states[pool_name]
-        if pool_state.inflight >= pool.max_inflight:
+        effective_pool_limit = self._effective_pool_limit_locked(pool_name)
+        if pool_state.inflight >= effective_pool_limit:
+            return None
+        if not self._can_acquire_under_global_budget_locked(pool_name):
             return None
 
         now = time.monotonic()
@@ -389,6 +431,84 @@ class LLMRouterRuntime:
         pool_state.inflight += 1
         return _RouterLease(pool_name=pool_name, deployment_name=selected, acquired_at=now)
 
+    def _effective_pool_limit_locked(self, pool_name: str) -> int:
+        pool = self.config.pools[pool_name]
+        adaptive = self.config.scheduler.adaptive_by_purpose.get(pool_name)
+        state = self._pool_states[pool_name]
+        if adaptive and adaptive.enabled:
+            ceiling = adaptive.max_inflight or pool.max_inflight
+            current = state.adaptive_limit if state.adaptive_limit is not None else adaptive.min_inflight
+            return max(adaptive.min_inflight, min(current, ceiling))
+        return pool.max_inflight
+
+    def _can_acquire_under_global_budget_locked(self, pool_name: str) -> bool:
+        scheduler = self.config.scheduler
+        if not scheduler.global_max_inflight:
+            return True
+        total_inflight = sum(state.inflight for state in self._pool_states.values())
+        blocked_reserved = 0
+        for other_pool_name, reserved in scheduler.reserved_by_purpose.items():
+            if other_pool_name == pool_name:
+                continue
+            other_pool_inflight = self._pool_states.get(other_pool_name, _PoolRuntimeState()).inflight
+            blocked_reserved += max(reserved - other_pool_inflight, 0)
+        allowed_total = max(scheduler.global_max_inflight - blocked_reserved, 0)
+        return total_inflight < allowed_total
+
+    def _adjust_pool_after_success_locked(self, pool_name: str, latency_ms: float) -> None:
+        adaptive = self.config.scheduler.adaptive_by_purpose.get(pool_name)
+        if not adaptive or not adaptive.enabled:
+            return
+        pool = self.config.pools[pool_name]
+        state = self._pool_states[pool_name]
+        ceiling = adaptive.max_inflight or pool.max_inflight
+        if state.adaptive_limit is None:
+            state.adaptive_limit = adaptive.min_inflight
+        if latency_ms > adaptive.latency_threshold_ms:
+            self._decrease_pool_limit_locked(pool_name, reason=f"latency={latency_ms:.0f}ms")
+            return
+        state.adaptive_success_streak += 1
+        if state.adaptive_success_streak < adaptive.increase_every:
+            return
+        if state.adaptive_limit >= ceiling:
+            state.adaptive_success_streak = 0
+            return
+        state.adaptive_limit += 1
+        state.adaptive_success_streak = 0
+        logger.info(
+            "LLM router increased adaptive pool limit pool=%s new_limit=%d ceiling=%d",
+            pool_name,
+            state.adaptive_limit,
+            ceiling,
+        )
+
+    def _adjust_pool_after_failure_locked(self, pool_name: str, retryable: bool, exc: Exception) -> None:
+        adaptive = self.config.scheduler.adaptive_by_purpose.get(pool_name)
+        if not adaptive or not adaptive.enabled:
+            return
+        state = self._pool_states[pool_name]
+        state.adaptive_success_streak = 0
+        if retryable:
+            self._decrease_pool_limit_locked(pool_name, reason=str(exc))
+
+    def _decrease_pool_limit_locked(self, pool_name: str, reason: str) -> None:
+        adaptive = self.config.scheduler.adaptive_by_purpose.get(pool_name)
+        if not adaptive or not adaptive.enabled:
+            return
+        state = self._pool_states[pool_name]
+        current = state.adaptive_limit if state.adaptive_limit is not None else adaptive.min_inflight
+        new_limit = max(adaptive.min_inflight, current - adaptive.decrease_step)
+        state.adaptive_success_streak = 0
+        if new_limit == current:
+            return
+        state.adaptive_limit = new_limit
+        logger.warning(
+            "LLM router decreased adaptive pool limit pool=%s new_limit=%d reason=%s",
+            pool_name,
+            new_limit,
+            reason,
+        )
+
     def _maybe_log_pool_stats_locked(self, pool_name: str) -> None:
         if self._stats_interval <= 0 or self._stats_events % self._stats_interval != 0:
             return
@@ -411,10 +531,12 @@ class LLMRouterRuntime:
                 parts.append(f"last={state.last_error[:80]}")
             deployment_summaries.append(f"{deployment_name}{{{' '.join(parts)}}}")
         logger.info(
-            "LLM router stats pool=%s total_events=%d pool_inflight=%d deployments=%s",
+            "LLM router stats pool=%s total_events=%d pool_inflight=%d pool_limit=%d global_inflight=%d deployments=%s",
             pool_name,
             self._stats_events,
             self._pool_states[pool_name].inflight,
+            self._effective_pool_limit_locked(pool_name),
+            sum(state.inflight for state in self._pool_states.values()),
             "; ".join(deployment_summaries) if deployment_summaries else "none",
         )
 

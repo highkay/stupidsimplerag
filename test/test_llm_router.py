@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from app import openai_utils
 
 
@@ -90,6 +92,134 @@ def test_router_runtime_logs_periodic_stats(monkeypatch):
     output = "\n".join(logged_messages)
     assert "LLM router stats pool=chat" in output
     assert "chat-primary{req=2 ok=2 fail=0" in output
+
+
+def test_router_runtime_reserves_chat_capacity_from_ingest():
+    config = openai_utils.LLMRouterConfig.model_validate(
+        {
+            "deployments": [
+                {
+                    "name": "chat-primary",
+                    "model": "grok-4.20-fast",
+                    "weight": 1,
+                    "max_inflight": 2,
+                    "purposes": ["chat"],
+                },
+                {
+                    "name": "ingest-primary",
+                    "model": "LongCat-Flash-Chat",
+                    "weight": 1,
+                    "max_inflight": 3,
+                    "purposes": ["ingest"],
+                },
+            ],
+            "pools": {
+                "chat": {"deployments": ["chat-primary"], "max_inflight": 2, "retry_budget": 1, "acquire_timeout_s": 0.05},
+                "ingest": {"deployments": ["ingest-primary"], "max_inflight": 3, "retry_budget": 1, "acquire_timeout_s": 0.05},
+            },
+            "scheduler": {
+                "global_max_inflight": 3,
+                "reserved_by_purpose": {"chat": 2},
+            },
+        }
+    )
+    runtime = openai_utils.LLMRouterRuntime(config)
+
+    first_ingest = runtime.acquire_sync("ingest")
+    assert first_ingest.deployment_name == "ingest-primary"
+
+    with pytest.raises(RuntimeError, match="no healthy capacity"):
+        runtime.acquire_sync("ingest")
+
+    first_chat = runtime.acquire_sync("chat")
+    second_chat = runtime.acquire_sync("chat")
+    assert first_chat.deployment_name == "chat-primary"
+    assert second_chat.deployment_name == "chat-primary"
+
+
+def test_router_runtime_adaptive_ingest_limit_grows_after_clean_successes():
+    config = openai_utils.LLMRouterConfig.model_validate(
+        {
+            "deployments": [
+                {
+                    "name": "ingest-primary",
+                    "model": "LongCat-Flash-Chat",
+                    "weight": 1,
+                    "max_inflight": 4,
+                    "purposes": ["ingest"],
+                },
+            ],
+            "pools": {
+                "ingest": {"deployments": ["ingest-primary"], "max_inflight": 4, "retry_budget": 1, "acquire_timeout_s": 0.05},
+            },
+            "scheduler": {
+                "adaptive_by_purpose": {
+                    "ingest": {
+                        "enabled": True,
+                        "min_inflight": 1,
+                        "max_inflight": 3,
+                        "increase_every": 2,
+                        "latency_threshold_ms": 5000,
+                    }
+                }
+            },
+        }
+    )
+    runtime = openai_utils.LLMRouterRuntime(config)
+
+    first = runtime.acquire_sync("ingest")
+    runtime.release_success_sync(first, 0.2)
+    second = runtime.acquire_sync("ingest")
+    runtime.release_success_sync(second, 0.2)
+
+    assert runtime._pool_states["ingest"].adaptive_limit == 2
+
+    lease_a = runtime.acquire_sync("ingest")
+    lease_b = runtime.acquire_sync("ingest")
+    assert lease_a.deployment_name == "ingest-primary"
+    assert lease_b.deployment_name == "ingest-primary"
+
+
+def test_router_runtime_adaptive_ingest_limit_shrinks_after_retryable_failure():
+    config = openai_utils.LLMRouterConfig.model_validate(
+        {
+            "deployments": [
+                {
+                    "name": "ingest-primary",
+                    "model": "LongCat-Flash-Chat",
+                    "weight": 1,
+                    "max_inflight": 4,
+                    "failure_threshold": 1,
+                    "cooldown_s": 10,
+                    "purposes": ["ingest"],
+                },
+            ],
+            "pools": {
+                "ingest": {"deployments": ["ingest-primary"], "max_inflight": 4, "retry_budget": 1, "acquire_timeout_s": 0.05},
+            },
+            "scheduler": {
+                "adaptive_by_purpose": {
+                    "ingest": {
+                        "enabled": True,
+                        "min_inflight": 1,
+                        "max_inflight": 3,
+                        "increase_every": 1,
+                        "latency_threshold_ms": 5000,
+                    }
+                }
+            },
+        }
+    )
+    runtime = openai_utils.LLMRouterRuntime(config)
+
+    first = runtime.acquire_sync("ingest")
+    runtime.release_success_sync(first, 0.1)
+    assert runtime._pool_states["ingest"].adaptive_limit == 2
+
+    second = runtime.acquire_sync("ingest")
+    runtime.release_failure_sync(second, 0.1, RuntimeError("429 Too Many Requests"))
+
+    assert runtime._pool_states["ingest"].adaptive_limit == 1
 
 
 def test_build_llm_uses_router_config_file_for_purpose_pools(monkeypatch, tmp_path):

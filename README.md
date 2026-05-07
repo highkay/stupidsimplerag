@@ -377,12 +377,14 @@ python offline_ingest.py \
   - least-inflight 选路
   - 对 `429` / `503` / timeout 的熔断与 cooldown
   - pool 级并发上限与 retry budget
+  - 可选 scheduler：全局并发预算、按 purpose 预留槽位、按 pool 的自适应并发窗口
 
 仓库内置了 [llm_router.example.json](./llm_router.example.json)，已经按当前生产思路拆好了 `chat` 与 `ingest` 两个池：
 
 - `chat`：`grok-4.20-fast`、`LongCat-Flash-Chat`、`gpt-oss:120b`、`gpt-oss:20b`
 - `ingest`：`LongCat-Flash-Chat`、`gpt-oss:120b`、`deepseek-v4-flash`、`qwen3-next:80b`、`qwen3-coder-next`
 - `gpt-oss:20b` 当前仅保留在 `chat` 默认池；`gemma4:31b`、`step-3.5-flash`、`qwen-3-235b-a22b-instruct-2507`、`qwen/qwen3.5-122b-a10b`、`qwen3-coder:480b` 已因真实流量下的 `429/503/timeout` 从默认池移除。
+- 默认 scheduler 是保守动态版：`global_max_inflight=6`、`chat` 预留 `2` 个槽位、`ingest` 在 `2..4` 间自适应，而不是把 `chat` 与 `ingest` 永久硬切成两个静态上限。
 
 推荐把它复制成生产文件后，在 `.env` 中只加一行：
 
@@ -424,6 +426,22 @@ router 会按固定完成事件数输出一次 pool 摘要，包含每个 deploy
       "cooldown_s": 20
     }
   ],
+  "scheduler": {
+    "global_max_inflight": 6,
+    "reserved_by_purpose": {
+      "chat": 2
+    },
+    "adaptive_by_purpose": {
+      "ingest": {
+        "enabled": true,
+        "min_inflight": 2,
+        "max_inflight": 4,
+        "increase_every": 8,
+        "latency_threshold_ms": 30000,
+        "decrease_step": 1
+      }
+    }
+  },
   "pools": {
     "chat": {
       "deployments": ["chat-step-flash"],
@@ -433,7 +451,7 @@ router 会按固定完成事件数输出一次 pool 摘要，包含每个 deploy
     },
     "ingest": {
       "deployments": ["ingest-deepseek-v4-flash"],
-      "max_inflight": 3,
+      "max_inflight": 4,
       "retry_budget": 2,
       "acquire_timeout_s": 15
     }
@@ -443,10 +461,11 @@ router 会按固定完成事件数输出一次 pool 摘要，包含每个 deploy
 
 建议的初始策略：
 
-- `chat` 池把 `max_inflight` 控在 `6` 左右，优先稳定低延迟模型。
-- `ingest` 池当前建议从 `max_inflight=3` 起步；这在当前线上 canary 中较 `2` 明显降低了排队与 `no healthy capacity`，但仍保留了对在线查询的余量。
+- `chat` 池维持较高 ceiling，但通过 `scheduler.reserved_by_purpose` 给在线请求留硬保底，而不是简单假设真实 chat 流量会长期打满。
+- `ingest` 池更适合做成“基础并发 + 自适应上探”；当前默认是 `min_inflight=2`、`max_inflight=4`，在最近窗口持续成功且长尾稳定时才逐步升档。
 - 大模型或慢模型给更低 `weight` 与更小 `max_inflight`，让它们只在有余量时承接流量。
 - 如果某个 gateway alias 后面其实还是同一组 provider/key，router 只能减少抖动与失败放大，不能凭空创造 RPM。
+- 如果 embedding/GPU 已经是热路径，调大全局预算不会免费提升吞吐；先看 router EWMA 与 embedding 时延，再决定是否把 `global_max_inflight` 从 `6` 往上探。
 
 ## 关联文档
 

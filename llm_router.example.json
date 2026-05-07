@@ -82,6 +82,22 @@
       "cooldown_s": 20
     }
   ],
+  "scheduler": {
+    "global_max_inflight": 6,
+    "reserved_by_purpose": {
+      "chat": 2
+    },
+    "adaptive_by_purpose": {
+      "ingest": {
+        "enabled": true,
+        "min_inflight": 2,
+        "max_inflight": 4,
+        "increase_every": 8,
+        "latency_threshold_ms": 30000,
+        "decrease_step": 1
+      }
+    }
+  },
   "pools": {
     "chat": {
       "deployments": [
@@ -102,7 +118,7 @@
         "ingest-qwen3-next-80b",
         "ingest-qwen3-coder-next"
       ],
-      "max_inflight": 3,
+      "max_inflight": 4,
       "retry_budget": 2,
       "acquire_timeout_s": 15
     }
