@@ -336,6 +336,25 @@ pytest -q
 
 这样可以避免大文档入库时单次 `/v1/embeddings` 请求超过客户端超时，导致 `/ingest` 或 `/ingest/text` 返回 `500`。
 
+## 离线回填
+
+`offline_ingest.py` 支持从进度文件断点续跑，并可通过低负载模式慢速回填：
+
+```bash
+python offline_ingest.py \
+  --dir ./data \
+  --api-base http://localhost:8000 \
+  --batch-size 1 \
+  --skip-completed \
+  --progress-file ./ingest_progress.json \
+  --delay-seconds 1.5
+```
+
+建议：
+
+- `batch-size=1` 配合 `delay-seconds`，作为长期低负载后台回填模式。
+- 需要更快时，再逐步把 `batch-size` 提到 `2` 或 `4`，不要和在线流量一起盲目放大。
+
 ## LLM 路由
 
 当前代码支持两种 LLM 路由模式：

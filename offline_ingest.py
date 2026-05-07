@@ -195,6 +195,13 @@ def _parse_batch_response(raw_text: str, paths: List[Path]) -> Tuple[List[Path],
     return success_paths, item_errors
 
 
+def maybe_delay_between_requests(delay_seconds: float) -> None:
+    if delay_seconds <= 0:
+        return
+    logger.debug("Sleeping %.2fs before next offline ingest request", delay_seconds)
+    time.sleep(delay_seconds)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Offline ingest utility for stupidsimplerag."
@@ -243,6 +250,12 @@ def main() -> None:
         type=int,
         default=3,
         help="单个批次的最大重试次数（默认: 3）",
+    )
+    parser.add_argument(
+        "--delay-seconds",
+        type=float,
+        default=0.0,
+        help="每次请求之间的额外等待时间（秒），用于低负载慢速回填。",
     )
     args = parser.parse_args()
 
@@ -308,6 +321,7 @@ def main() -> None:
                         save_progress(progress_file, completed_files)
                 else:
                     logger.error("Failed ingest %s: %s", path, message)
+                maybe_delay_between_requests(args.delay_seconds)
         else:
             # 批量模式
             for chunk in chunked(files, args.batch_size):
@@ -331,6 +345,7 @@ def main() -> None:
                     names = ", ".join(p.name for p in chunk)
                     error_suffix = f" | item_errors={'; '.join(item_errors)}" if item_errors else ""
                     logger.error("Failed batch [%s]: %s%s", names, message, error_suffix)
+                maybe_delay_between_requests(args.delay_seconds)
 
     logger.info("Finished ingest: %d/%d files succeeded", success, total)
     if args.skip_completed:

@@ -1,6 +1,7 @@
 import json
+from unittest.mock import patch
 
-from offline_ingest import ingest_batch
+from offline_ingest import ingest_batch, maybe_delay_between_requests
 
 
 class _Response:
@@ -53,3 +54,18 @@ def test_ingest_batch_all_failed_returns_false(tmp_path):
     assert ok is False
     assert success_paths == []
     assert len(item_errors) == 1
+
+
+def test_maybe_delay_between_requests_skips_non_positive():
+    with patch("offline_ingest.time.sleep") as sleep:
+        maybe_delay_between_requests(0)
+        maybe_delay_between_requests(-1)
+
+    sleep.assert_not_called()
+
+
+def test_maybe_delay_between_requests_sleeps_when_positive():
+    with patch("offline_ingest.time.sleep") as sleep:
+        maybe_delay_between_requests(1.25)
+
+    sleep.assert_called_once_with(1.25)
