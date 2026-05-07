@@ -134,7 +134,6 @@ def test_example_router_config_inherits_shared_gateway_env(monkeypatch):
         "ingest-gpt-oss-120b",
         "ingest-longcat-flash",
         "ingest-qwen3-5-122b-a10b",
-        "ingest-qwen3-6-plus",
         "ingest-qwen3-coder-480b",
         "ingest-qwen3-coder-next",
         "ingest-qwen3-next-80b",

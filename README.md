@@ -376,8 +376,7 @@ python offline_ingest.py \
 仓库内置了 [llm_router.example.json](./llm_router.example.json)，已经按当前生产思路拆好了 `chat` 与 `ingest` 两个池：
 
 - `chat`：`grok-4.20-fast`、`step-3.5-flash`、`LongCat-Flash-Chat`、`qwen-3-235b-a22b-instruct-2507`、`gpt-oss:120b`、`gemma4:31b`
-- `ingest`：`LongCat-Flash-Chat`、`gpt-oss:120b`、`deepseek-v4-flash`、`qwen3-next:80b`、`qwen/qwen3.5-122b-a10b`、`qwen3-coder-next`、`qwen3-coder:480b`、`qwen3.6-plus`
-- `qwen3.6-plus` 当前建议仅作为低权重补容量模型使用，不建议作为 ingest 主力。
+- `ingest`：`LongCat-Flash-Chat`、`gpt-oss:120b`、`deepseek-v4-flash`、`qwen3-next:80b`、`qwen/qwen3.5-122b-a10b`、`qwen3-coder-next`、`qwen3-coder:480b`
 
 推荐把它复制成生产文件后，在 `.env` 中只加一行：
 
