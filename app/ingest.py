@@ -3,8 +3,9 @@ import hashlib
 import json
 import logging
 import os
+import re
 import time
-from typing import List
+from typing import Any, List
 
 from chonkie import TokenChunker
 from llama_index.core.schema import TextNode
@@ -59,6 +60,116 @@ def _strip_code_fence(content: str) -> str:
     return text
 
 
+def _read_field(value: Any, field: str) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        return value.get(field)
+    return getattr(value, field, None)
+
+
+def _normalize_text_candidate(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        text = value.strip()
+        return text or None
+    if isinstance(value, list):
+        text_parts: list[str] = []
+        for item in value:
+            item_type = _read_field(item, "type")
+            if item_type not in (None, "text", "output_text"):
+                continue
+            item_text = _read_field(item, "text")
+            if item_text is None:
+                item_text = _read_field(item, "content")
+            if item_text:
+                text_parts.append(str(item_text))
+        text = "".join(text_parts).strip()
+        return text or None
+    text = str(value).strip()
+    return text or None
+
+
+def _iter_json_object_candidates(text: str):
+    starts = [match.start() for match in re.finditer(r"\{", text)]
+    for start in starts[:32]:
+        depth = 0
+        in_string = False
+        escaped = False
+        for index in range(start, len(text)):
+            char = text[index]
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == '"':
+                    in_string = False
+                continue
+            if char == '"':
+                in_string = True
+            elif char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    yield text[start : index + 1]
+                    break
+
+
+def _extract_llm_analysis_payload(response: Any) -> tuple[dict[str, Any], str]:
+    seen: set[str] = set()
+    candidates: list[tuple[str, str]] = []
+
+    def add_candidate(source: str, value: Any) -> None:
+        text = _normalize_text_candidate(value)
+        if not text:
+            return
+        text = _strip_code_fence(text)
+        if not text or text in seen:
+            return
+        seen.add(text)
+        candidates.append((source, text))
+
+    add_candidate("response.text", getattr(response, "text", None))
+
+    raw = getattr(response, "raw", None)
+    raw_choices = _read_field(raw, "choices")
+    if isinstance(raw_choices, list) and raw_choices:
+        first_choice = raw_choices[0]
+        message = _read_field(first_choice, "message")
+        if message is not None:
+            add_candidate("raw.message.content", _read_field(message, "content"))
+            add_candidate(
+                "raw.message.reasoning_content",
+                _read_field(message, "reasoning_content"),
+            )
+            add_candidate("raw.message.reasoning", _read_field(message, "reasoning"))
+        add_candidate("raw.choice.text", _read_field(first_choice, "text"))
+
+    for source, text in candidates:
+        try:
+            payload = json.loads(text)
+            if isinstance(payload, dict):
+                return payload, source
+        except json.JSONDecodeError:
+            pass
+        for fragment in _iter_json_object_candidates(text):
+            try:
+                payload = json.loads(fragment)
+                if isinstance(payload, dict):
+                    return payload, f"{source}:substring"
+            except json.JSONDecodeError:
+                continue
+
+    raise json.JSONDecodeError(
+        "No valid JSON object found in LLM response",
+        candidates[0][1] if candidates else "",
+        0,
+    )
+
+
 async def analyze_document(text: str) -> LLMAnalysis:
     context = text[:4000]
     prompt = f"""
@@ -91,18 +202,17 @@ async def analyze_document(text: str) -> LLMAnalysis:
                     _llm_retry_attempts,
                 )
                 response = await extractor_llm.acomplete(prompt)
-                content = getattr(response, "text", str(response)).strip()
-                content = _strip_code_fence(content)
-                data = json.loads(content)
+                data, source = _extract_llm_analysis_payload(response)
                 analysis = LLMAnalysis.model_validate(data)
                 duration = time.perf_counter() - attempt_start
                 logger.debug(
-                    "Analyzer succeeded attempt=%d duration=%.2fs summary_len=%d table_len=%d keywords=%d",
+                    "Analyzer succeeded attempt=%d duration=%.2fs summary_len=%d table_len=%d keywords=%d source=%s",
                     attempt,
                     duration,
                     len(analysis.summary),
                     len(analysis.table_narrative),
                     len(analysis.keywords or []),
+                    source,
                 )
                 return analysis
             except Exception as exc:
