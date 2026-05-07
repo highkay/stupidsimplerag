@@ -3,7 +3,15 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from chonkie import TokenChunker
 
-from app.ingest import DEFAULT_CHUNK_PLAN, MEDIUM_CHUNK_PLAN, LARGE_CHUNK_PLAN, XL_CHUNK_PLAN, choose_chunk_plan, process_file
+from app.ingest import (
+    DEFAULT_CHUNK_PLAN,
+    MEDIUM_CHUNK_PLAN,
+    LARGE_CHUNK_PLAN,
+    XL_CHUNK_PLAN,
+    XXL_CHUNK_PLAN,
+    choose_chunk_plan,
+    process_file,
+)
 from app.models import LLMAnalysis
 
 
@@ -11,6 +19,10 @@ def test_choose_chunk_plan_keeps_list_sections_small():
     assert choose_chunk_plan(document_length=200_000, section_type="appendix_list") == DEFAULT_CHUNK_PLAN
     assert choose_chunk_plan(document_length=200_000, section_type="appendix_table") == DEFAULT_CHUNK_PLAN
     assert choose_chunk_plan(document_length=200_000, section_type="qa") == DEFAULT_CHUNK_PLAN
+
+
+def test_choose_chunk_plan_uses_xxl_for_ultra_large_body_documents():
+    assert choose_chunk_plan(document_length=350_000, section_type="body") == XXL_CHUNK_PLAN
 
 
 @pytest.mark.asyncio
@@ -48,6 +60,7 @@ async def test_process_file_uses_larger_body_chunks_for_large_documents():
         MEDIUM_CHUNK_PLAN,
         LARGE_CHUNK_PLAN,
         XL_CHUNK_PLAN,
+        XXL_CHUNK_PLAN,
     }
     assert all(node.metadata["section_type"] in {"title", "body"} for node in nodes)
 

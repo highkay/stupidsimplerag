@@ -106,6 +106,7 @@ uvicorn app.main:app --reload
 - `force_update`（可选）：`true` 时先删同名文档再重建
 - `scope`（可选）：逻辑命名空间，作为文档身份的一部分写入 metadata
 - 可选请求头 `X-File-Mtime`：支持 Unix 时间戳（秒/毫秒）或 ISO 时间，按 `APP_TIMEZONE`（或 `TZ`）归一为日期
+- 同一 `(filename, scope, doc_hash, ingest_date, force_update)` 的并发重复请求会做 in-flight 合并；若同一 `(filename, scope)` 的不同版本同时到达，则会串行执行，避免 `force_update` 重试把同一文档反复 delete + partial reinsert
 
 `/ingest/text` 请求体：
 
@@ -213,7 +214,7 @@ curl -X POST http://localhost:8000/chat \
 1.1 grounding metadata
 - `process_file()` 会额外写入 `doc_summary`、`section_type`、`section_order`、`block_index`、`chunk_index`、`heading_path`、`is_list_zone`、`is_qa_zone`。
 - 这些字段服务于 `/grounding/query`，不会改变 `/chat` 与 `/chat/lod` 的请求/响应合同。
-- 当前切块不是“整篇文档固定 512 token 生切”。实现会先做 `split_document_blocks()` 语义分区，再对连续 `title/body` block 做合并，并按文档规模对正文 chunk 做自适应放大（默认 `512 -> 768 -> 1024 -> 1536`），而 `qa` / `appendix_list` / `appendix_table` 仍保持小块以保留 grounding 精度。
+- 当前切块不是“整篇文档固定 512 token 生切”。实现会先做 `split_document_blocks()` 语义分区，再对连续 `title/body` block 做合并，并按文档规模对正文 chunk 做自适应放大（默认 `512 -> 768 -> 1024 -> 1536 -> 3072`）；几十万字的超大正文会直接使用更大的 chunk 以降低 embedding 次数，而 `qa` / `appendix_list` / `appendix_table` 仍保持小块以保留 grounding 精度。
 
 2. 检索后处理顺序
 - `ContentFilterPostprocessor`

@@ -37,6 +37,7 @@ DEFAULT_CHUNK_PLAN = (512, 50)
 MEDIUM_CHUNK_PLAN = (768, 64)
 LARGE_CHUNK_PLAN = (1024, 80)
 XL_CHUNK_PLAN = (1536, 96)
+XXL_CHUNK_PLAN = (3072, 192)
 
 
 @lru_cache(maxsize=8)
@@ -53,6 +54,8 @@ def choose_chunk_plan(*, document_length: int, section_type: str) -> tuple[int, 
     """
     if section_type in LIST_SECTION_TYPES or section_type == "qa":
         return DEFAULT_CHUNK_PLAN
+    if document_length >= 300_000:
+        return XXL_CHUNK_PLAN
     if document_length >= 120_000:
         return XL_CHUNK_PLAN
     if document_length >= 40_000:
@@ -94,11 +97,12 @@ def _merge_chunkable_blocks(blocks: List[PreprocessedBlock]) -> List[Preprocesse
 
 
 logger.debug(
-    "Initialized adaptive TokenChunker default=%s medium=%s large=%s xl=%s llm_context=%d retries=%d backoff=%.2f concurrency=%d",
+    "Initialized adaptive TokenChunker default=%s medium=%s large=%s xl=%s xxl=%s llm_context=%d retries=%d backoff=%.2f concurrency=%d",
     DEFAULT_CHUNK_PLAN,
     MEDIUM_CHUNK_PLAN,
     LARGE_CHUNK_PLAN,
     XL_CHUNK_PLAN,
+    XXL_CHUNK_PLAN,
     _llm_context_window,
     _llm_retry_attempts,
     _llm_retry_backoff,

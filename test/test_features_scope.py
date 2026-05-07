@@ -107,6 +107,7 @@ def test_ingest_text_default_date_uses_app_timezone(client):
         ingest_date: str | None,
         force_update: bool = False,
         scope: str | None = None,
+        doc_hash: str | None = None,
     ):
         captured["ingest_date"] = ingest_date
         return [], False, "fake_hash"

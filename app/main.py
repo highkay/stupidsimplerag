@@ -67,6 +67,8 @@ INSERT_MAX_RETRIES = max(1, int(os.getenv("INGEST_INSERT_MAX_RETRIES", "3")))
 INSERT_RETRY_BACKOFF = float(os.getenv("INGEST_INSERT_RETRY_BACKOFF", "2.0"))
 QUERY_MAX_RETRIES = max(1, int(os.getenv("QUERY_MAX_RETRIES", "3")))
 QUERY_RETRY_BACKOFF = float(os.getenv("QUERY_RETRY_BACKOFF", "2.0"))
+_INGEST_DOC_LOCKS: Dict[str, asyncio.Lock] = {}
+_INGEST_REQUEST_FUTURES: Dict[str, asyncio.Future] = {}
 
 
 @app.get("/health")
@@ -174,6 +176,28 @@ def _extract_upload_date(upload: UploadFile) -> Optional[str]:
     return _extract_date_header(upload.headers.get("x-file-mtime"), upload.filename)
 
 
+def _ingest_doc_key(filename: str, scope: Optional[str]) -> str:
+    return f"{filename}|{_normalize_scope(scope) or ''}"
+
+
+def _ingest_request_key(
+    filename: str,
+    *,
+    scope: Optional[str],
+    doc_hash: str,
+    ingest_date: Optional[str],
+    force_update: bool,
+) -> str:
+    return "|".join(
+        [
+            _ingest_doc_key(filename, scope),
+            doc_hash,
+            ingest_date or "",
+            "force" if force_update else "normal",
+        ]
+    )
+
+
 def _decode_upload_bytes(raw_bytes: Optional[bytes], filename: str) -> str:
     data = raw_bytes or b""
     try:
@@ -255,14 +279,19 @@ def _generate_answer_from_nodes(nodes: List, limit: int = 3) -> str:
 
 
 async def _process_and_insert_content(
-    filename: str, content: str, ingest_date: Optional[str], force_update: bool = False, scope: Optional[str] = None
+    filename: str,
+    content: str,
+    ingest_date: Optional[str],
+    force_update: bool = False,
+    scope: Optional[str] = None,
+    doc_hash: Optional[str] = None,
 ) -> tuple[List[TextNode], bool, str]:
     """
     Shared helper to run expensive processing & DB insert without blocking the event loop.
     """
     scope = _normalize_scope(scope)
     content_len = len(content)
-    doc_hash = compute_doc_hash(content)
+    doc_hash = doc_hash or compute_doc_hash(content)
     logger.debug(
         "Begin ingest pipeline file=%s ingest_date=%s content_len=%d doc_hash=%s force_update=%s scope=%s",
         filename,
@@ -330,6 +359,75 @@ async def _process_and_insert_content(
     return nodes, False, doc_hash
 
 
+async def _process_and_insert_content_deduped(
+    filename: str,
+    content: str,
+    ingest_date: Optional[str],
+    *,
+    force_update: bool = False,
+    scope: Optional[str] = None,
+) -> tuple[List[TextNode], bool, str]:
+    scope = _normalize_scope(scope)
+    doc_hash = compute_doc_hash(content)
+    doc_key = _ingest_doc_key(filename, scope)
+    request_key = _ingest_request_key(
+        filename,
+        scope=scope,
+        doc_hash=doc_hash,
+        ingest_date=ingest_date,
+        force_update=force_update,
+    )
+
+    existing = _INGEST_REQUEST_FUTURES.get(request_key)
+    if existing is not None:
+        logger.info(
+            "Joining in-flight ingest request file=%s scope=%s force_update=%s doc_hash=%s",
+            filename,
+            scope,
+            force_update,
+            doc_hash,
+        )
+        return await asyncio.shield(existing)
+
+    lock = _INGEST_DOC_LOCKS.setdefault(doc_key, asyncio.Lock())
+    async with lock:
+        existing = _INGEST_REQUEST_FUTURES.get(request_key)
+        if existing is not None:
+            logger.info(
+                "Joining in-flight ingest request after lock file=%s scope=%s force_update=%s doc_hash=%s",
+                filename,
+                scope,
+                force_update,
+                doc_hash,
+            )
+            return await asyncio.shield(existing)
+
+        future: asyncio.Future = asyncio.get_running_loop().create_future()
+        future.add_done_callback(
+            lambda fut: None if fut.cancelled() else fut.exception()
+        )
+        _INGEST_REQUEST_FUTURES[request_key] = future
+        try:
+            result = await _process_and_insert_content(
+                filename,
+                content,
+                ingest_date,
+                force_update=force_update,
+                scope=scope,
+                doc_hash=doc_hash,
+            )
+        except Exception as exc:
+            future.set_exception(exc)
+            raise
+        else:
+            future.set_result(result)
+            return result
+        finally:
+            current = _INGEST_REQUEST_FUTURES.get(request_key)
+            if current is future:
+                _INGEST_REQUEST_FUTURES.pop(request_key, None)
+
+
 
 async def _insert_nodes_with_retry(nodes: List[TextNode]) -> None:
     if not nodes:
@@ -364,7 +462,7 @@ async def _ingest_single_upload(upload: UploadFile, force_update: bool = False, 
         )
         content = _decode_upload_bytes(raw_bytes, upload.filename)
         ingest_date = _extract_upload_date(upload)
-        nodes, skipped, doc_hash = await _process_and_insert_content(
+        nodes, skipped, doc_hash = await _process_and_insert_content_deduped(
             upload.filename, content, ingest_date, force_update=force_update, scope=scope
         )
         status = "skipped" if skipped else "ok"
@@ -405,7 +503,7 @@ async def ingest_api(
     logger.debug("Received upload file=%s size_bytes=%d", file.filename, byte_len)
     content = _decode_upload_bytes(raw_bytes, file.filename)
     ingest_date = _extract_upload_date(file)
-    nodes, skipped, doc_hash = await _process_and_insert_content(
+    nodes, skipped, doc_hash = await _process_and_insert_content_deduped(
         file.filename, content, ingest_date, force_update=force_update, scope=scope
     )
     status = "skipped" if skipped else "ok"
@@ -548,7 +646,7 @@ async def ingest_text_api(request: Request, body: TextIngestRequest) -> IngestRe
         len(body.content),
         len(content),
     )
-    nodes, skipped, doc_hash = await _process_and_insert_content(
+    nodes, skipped, doc_hash = await _process_and_insert_content_deduped(
         filename, content, ingest_date, force_update=body.force_update, scope=scope
     )
     status = "skipped" if skipped else "ok"
