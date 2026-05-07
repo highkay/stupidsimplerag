@@ -46,6 +46,15 @@
       "cooldown_s": 45
     },
     {
+      "name": "chat-gpt-oss-20b",
+      "model": "gpt-oss:20b",
+      "weight": 1,
+      "max_inflight": 1,
+      "timeout_s": 25,
+      "failure_threshold": 3,
+      "cooldown_s": 20
+    },
+    {
       "name": "chat-gemma4-31b",
       "model": "gemma4:31b",
       "weight": 2,
@@ -71,6 +80,24 @@
       "timeout_s": 60,
       "failure_threshold": 3,
       "cooldown_s": 45
+    },
+    {
+      "name": "ingest-gpt-oss-20b",
+      "model": "gpt-oss:20b",
+      "weight": 1,
+      "max_inflight": 1,
+      "timeout_s": 35,
+      "failure_threshold": 3,
+      "cooldown_s": 20
+    },
+    {
+      "name": "ingest-gemma4-31b",
+      "model": "gemma4:31b",
+      "weight": 1,
+      "max_inflight": 1,
+      "timeout_s": 45,
+      "failure_threshold": 3,
+      "cooldown_s": 30
     },
     {
       "name": "ingest-deepseek-v4-flash",
@@ -126,6 +153,7 @@
         "chat-longcat-flash",
         "chat-qwen-235b",
         "chat-gpt-oss-120b",
+        "chat-gpt-oss-20b",
         "chat-gemma4-31b"
       ],
       "max_inflight": 6,
@@ -136,6 +164,8 @@
       "deployments": [
         "ingest-longcat-flash",
         "ingest-gpt-oss-120b",
+        "ingest-gpt-oss-20b",
+        "ingest-gemma4-31b",
         "ingest-deepseek-v4-flash",
         "ingest-qwen3-next-80b",
         "ingest-qwen3-5-122b-a10b",
