@@ -357,7 +357,7 @@ pytest -q
 仓库内置了 [llm_router.example.json](./llm_router.example.json)，已经按当前生产思路拆好了 `chat` 与 `ingest` 两个池：
 
 - `chat`：`grok-4.20-fast`、`step-3.5-flash`、`LongCat-Flash-Chat`、`qwen-3-235b-a22b-instruct-2507`、`gpt-oss:120b`、`gemma4:31b`
-- `ingest`：`step-3.5-flash`、`LongCat-Flash-Chat`、`gpt-oss:120b`、`deepseek-v4-flash`、`nemotron-3-super`、`qwen3-next:80b`、`qwen/qwen3.5-122b-a10b`
+- `ingest`：`LongCat-Flash-Chat`、`gpt-oss:120b`、`deepseek-v4-flash`、`qwen3-next:80b`、`qwen/qwen3.5-122b-a10b`、`qwen3-coder-next`、`qwen3-coder:480b`
 
 推荐把它复制成生产文件后，在 `.env` 中只加一行：
 
@@ -400,7 +400,7 @@ LLM_ROUTER_CONFIG_FILE=./llm_router.json
     },
     "ingest": {
       "deployments": ["ingest-deepseek-v4-flash"],
-      "max_inflight": 2,
+      "max_inflight": 3,
       "retry_budget": 2,
       "acquire_timeout_s": 15
     }
@@ -411,7 +411,7 @@ LLM_ROUTER_CONFIG_FILE=./llm_router.json
 建议的初始策略：
 
 - `chat` 池把 `max_inflight` 控在 `6` 左右，优先稳定低延迟模型。
-- `ingest` 池把 `max_inflight` 控在 `2` 左右，只吃剩余容量，避免回填挤占在线查询。
+- `ingest` 池当前建议从 `max_inflight=3` 起步；这在当前线上 canary 中较 `2` 明显降低了排队与 `no healthy capacity`，但仍保留了对在线查询的余量。
 - 大模型或慢模型给更低 `weight` 与更小 `max_inflight`，让它们只在有余量时承接流量。
 - 如果某个 gateway alias 后面其实还是同一组 provider/key，router 只能减少抖动与失败放大，不能凭空创造 RPM。
 
