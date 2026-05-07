@@ -130,7 +130,6 @@ def test_example_router_config_inherits_shared_gateway_env(monkeypatch):
         "chat-step-flash",
     ]
     assert sorted(ingest_llm._delegates_by_name) == [
-        "ingest-deepseek-v3-2",
         "ingest-deepseek-v4-flash",
         "ingest-gpt-oss-120b",
         "ingest-longcat-flash",

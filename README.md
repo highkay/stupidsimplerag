@@ -357,7 +357,7 @@ pytest -q
 仓库内置了 [llm_router.example.json](./llm_router.example.json)，已经按当前生产思路拆好了 `chat` 与 `ingest` 两个池：
 
 - `chat`：`grok-4.20-fast`、`step-3.5-flash`、`LongCat-Flash-Chat`、`qwen-3-235b-a22b-instruct-2507`、`gpt-oss:120b`、`gemma4:31b`
-- `ingest`：`step-3.5-flash`、`LongCat-Flash-Chat`、`gpt-oss:120b`、`deepseek-v4-flash`、`nemotron-3-super`、`deepseek-v3.2`、`qwen3-next:80b`、`qwen/qwen3.5-122b-a10b`
+- `ingest`：`step-3.5-flash`、`LongCat-Flash-Chat`、`gpt-oss:120b`、`deepseek-v4-flash`、`nemotron-3-super`、`qwen3-next:80b`、`qwen/qwen3.5-122b-a10b`
 
 推荐把它复制成生产文件后，在 `.env` 中只加一行：
 
