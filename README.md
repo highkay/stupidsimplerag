@@ -213,6 +213,7 @@ curl -X POST http://localhost:8000/chat \
 1.1 grounding metadata
 - `process_file()` 会额外写入 `doc_summary`、`section_type`、`section_order`、`block_index`、`chunk_index`、`heading_path`、`is_list_zone`、`is_qa_zone`。
 - 这些字段服务于 `/grounding/query`，不会改变 `/chat` 与 `/chat/lod` 的请求/响应合同。
+- 当前切块不是“整篇文档固定 512 token 生切”。实现会先做 `split_document_blocks()` 语义分区，再对连续 `title/body` block 做合并，并按文档规模对正文 chunk 做自适应放大（默认 `512 -> 768 -> 1024 -> 1536`），而 `qa` / `appendix_list` / `appendix_table` 仍保持小块以保留 grounding 精度。
 
 2. 检索后处理顺序
 - `ContentFilterPostprocessor`

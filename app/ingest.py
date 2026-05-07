@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import time
+from functools import lru_cache
 from typing import Any, List
 
 from chonkie import TokenChunker
@@ -12,7 +13,7 @@ from llama_index.core.schema import TextNode
 
 from app.models import LLMAnalysis
 from app.openai_utils import build_llm
-from app.preprocess import split_document_blocks, summarize_chunk_blocks
+from app.preprocess import BODY_SECTION_TYPES, LIST_SECTION_TYPES, PreprocessedBlock, split_document_blocks
 from app.utils import extract_date_from_filename
 
 logger = logging.getLogger(__name__)
@@ -32,11 +33,72 @@ extractor_llm = build_llm(
     context_window=_llm_context_window,
 )
 
-chunker = TokenChunker(chunk_size=512, chunk_overlap=50)
+DEFAULT_CHUNK_PLAN = (512, 50)
+MEDIUM_CHUNK_PLAN = (768, 64)
+LARGE_CHUNK_PLAN = (1024, 80)
+XL_CHUNK_PLAN = (1536, 96)
+
+
+@lru_cache(maxsize=8)
+def _get_chunker(chunk_size: int, chunk_overlap: int) -> TokenChunker:
+    return TokenChunker(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+
+
+def choose_chunk_plan(*, document_length: int, section_type: str) -> tuple[int, int]:
+    """Choose a conservative chunking profile.
+
+    Large body sections benefit most from larger chunks because embedding/write
+    costs scale almost linearly with chunk count. Appendix/list/table sections
+    keep smaller chunks to preserve grounding precision.
+    """
+    if section_type in LIST_SECTION_TYPES or section_type == "qa":
+        return DEFAULT_CHUNK_PLAN
+    if document_length >= 120_000:
+        return XL_CHUNK_PLAN
+    if document_length >= 40_000:
+        return LARGE_CHUNK_PLAN
+    if document_length >= 12_000:
+        return MEDIUM_CHUNK_PLAN
+    return DEFAULT_CHUNK_PLAN
+
+
+def _merge_chunkable_blocks(blocks: List[PreprocessedBlock]) -> List[PreprocessedBlock]:
+    if not blocks:
+        return []
+
+    merged: list[PreprocessedBlock] = []
+    current = blocks[0]
+    for block in blocks[1:]:
+        can_merge = (
+            current.section_type in BODY_SECTION_TYPES
+            and block.section_type in BODY_SECTION_TYPES
+            and current.heading_path == block.heading_path
+        )
+        if can_merge:
+            merged_text = f"{current.text}\n\n{block.text}"
+            merged_section_type = "body" if "body" in {current.section_type, block.section_type} else current.section_type
+            current = PreprocessedBlock(
+                text=merged_text,
+                section_type=merged_section_type,
+                section_order=current.section_order,
+                block_index=current.block_index,
+                heading_path=current.heading_path or block.heading_path,
+                is_list_zone=False,
+                is_qa_zone=False,
+            )
+            continue
+        merged.append(current)
+        current = block
+    merged.append(current)
+    return merged
+
+
 logger.debug(
-    "Initialized TokenChunker chunk_size=%s chunk_overlap=%s llm_context=%d retries=%d backoff=%.2f concurrency=%d",
-    getattr(chunker, "chunk_size", "unknown"),
-    getattr(chunker, "chunk_overlap", "unknown"),
+    "Initialized adaptive TokenChunker default=%s medium=%s large=%s xl=%s llm_context=%d retries=%d backoff=%.2f concurrency=%d",
+    DEFAULT_CHUNK_PLAN,
+    MEDIUM_CHUNK_PLAN,
+    LARGE_CHUNK_PLAN,
+    XL_CHUNK_PLAN,
     _llm_context_window,
     _llm_retry_attempts,
     _llm_retry_backoff,
@@ -313,72 +375,84 @@ async def process_file(
         keywords_str or "<empty>",
     )
 
+    blocks = _merge_chunkable_blocks(split_document_blocks(content))
+    logger.debug(
+        "Preprocessed file=%s into %d semantic blocks", filename, len(blocks)
+    )
+
     nodes: List[TextNode] = []
     min_chunk_len: int | None = None
     max_chunk_len = 0
     total_chars = 0
-    chunk_size = getattr(chunker, "chunk_size", "unknown")
-    chunk_overlap = getattr(chunker, "chunk_overlap", "unknown")
-    logger.debug(
-        "Running chunker file=%s total_chars=%d chunk_size=%s overlap=%s",
-        filename,
-        content_length,
-        chunk_size,
-        chunk_overlap,
-    )
     chunk_index = 0
-    for idx, chunk in enumerate(chunker(content)):
-        chunk_text = getattr(chunk, "text", str(chunk))
-        chunk_len = len(chunk_text)
-        total_chars += chunk_len
-        if min_chunk_len is None or chunk_len < min_chunk_len:
-            min_chunk_len = chunk_len
-        if chunk_len > max_chunk_len:
-            max_chunk_len = chunk_len
-        full_text = f"{header_text}{chunk_text}"
-        local_blocks = split_document_blocks(chunk_text, allow_title=False)
-        section_type, heading_path, is_list_zone, is_qa_zone = summarize_chunk_blocks(
-            local_blocks
-        )
-        node_metadata = {
-            "filename": filename,
-            "date": meta_date,
-            "date_numeric": meta_date_numeric,
-            "doc_hash": doc_hash,
-            "doc_summary": doc_summary,
-            "keywords": keywords_str,
-            "keyword_list": keywords,
-            "original_text": chunk_text,
-            "section_type": section_type,
-            "section_order": idx,
-            "block_index": idx,
-            "chunk_index": chunk_index,
-            "heading_path": heading_path,
-            "is_list_zone": is_list_zone,
-            "is_qa_zone": is_qa_zone,
-        }
-        if scope:
-            node_metadata["scope"] = scope
+    chunk_plan_counts: dict[tuple[int, int], int] = {}
+    source_blocks = blocks
+    if not source_blocks and content.strip():
+        source_blocks = split_document_blocks(content, allow_title=False)
 
-        node = TextNode(
-            text=full_text,
-            metadata=node_metadata,
+    for block in source_blocks:
+        chunk_size, chunk_overlap = choose_chunk_plan(
+            document_length=content_length,
+            section_type=block.section_type,
         )
-        # Scope is part of the document identity: identical content can coexist
-        # across different namespaces without colliding on node IDs.
-        hash_base = f"{doc_hash or filename}|{scope or ''}"
-        node.id_ = hashlib.md5(f"{hash_base}_{idx}".encode()).hexdigest()
-        nodes.append(node)
-        chunk_index += 1
+        chunk_plan_counts[(chunk_size, chunk_overlap)] = chunk_plan_counts.get((chunk_size, chunk_overlap), 0) + 1
+        block_chunker = _get_chunker(chunk_size, chunk_overlap)
+        logger.debug(
+            "Chunking block file=%s block_index=%d section=%s block_len=%d chunk_size=%d overlap=%d",
+            filename,
+            block.block_index,
+            block.section_type,
+            len(block.text),
+            chunk_size,
+            chunk_overlap,
+        )
+        for chunk in block_chunker(block.text):
+            chunk_text = getattr(chunk, "text", str(chunk))
+            chunk_len = len(chunk_text)
+            total_chars += chunk_len
+            if min_chunk_len is None or chunk_len < min_chunk_len:
+                min_chunk_len = chunk_len
+            if chunk_len > max_chunk_len:
+                max_chunk_len = chunk_len
+            full_text = f"{header_text}{chunk_text}"
+            node_metadata = {
+                "filename": filename,
+                "date": meta_date,
+                "date_numeric": meta_date_numeric,
+                "doc_hash": doc_hash,
+                "doc_summary": doc_summary,
+                "keywords": keywords_str,
+                "keyword_list": keywords,
+                "original_text": chunk_text,
+                "section_type": block.section_type,
+                "section_order": block.section_order,
+                "block_index": block.block_index,
+                "chunk_index": chunk_index,
+                "heading_path": block.heading_path,
+                "is_list_zone": block.is_list_zone,
+                "is_qa_zone": block.is_qa_zone,
+            }
+            if scope:
+                node_metadata["scope"] = scope
+
+            node = TextNode(
+                text=full_text,
+                metadata=node_metadata,
+            )
+            hash_base = f"{doc_hash or filename}|{scope or ''}"
+            node.id_ = hashlib.md5(f"{hash_base}_{chunk_index}".encode()).hexdigest()
+            nodes.append(node)
+            chunk_index += 1
     if nodes:
         avg_len = total_chars / len(nodes)
         logger.debug(
-            "Chunk stats file=%s count=%d avg_len=%.1f min_len=%s max_len=%s",
+            "Chunk stats file=%s count=%d avg_len=%.1f min_len=%s max_len=%s plans=%s",
             filename,
             len(nodes),
             avg_len,
             min_chunk_len,
             max_chunk_len,
+            {f"{size}/{overlap}": count for (size, overlap), count in sorted(chunk_plan_counts.items())},
         )
     else:
         logger.warning("No chunks produced for file=%s; input may be empty", filename)

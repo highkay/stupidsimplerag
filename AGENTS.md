@@ -42,7 +42,7 @@
 - `app/ingest.py`
   - `compute_doc_hash(content)`（SHA256）。
   - `analyze_document()`：LLM 返回 `LLMAnalysis`。
-  - `process_file()`：切片并写 metadata（含 grounding 所需文档摘要与区域标签）。
+  - `process_file()`：先按语义 block 预处理，再按文档规模/区块类型自适应切片并写 metadata（含 grounding 所需文档摘要与区域标签）。
 
 - `app/core.py`
   - Embedding 封装（OpenAI 原生 + fallback 到兼容 REST）。
