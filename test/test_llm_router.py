@@ -159,7 +159,6 @@ def test_example_router_config_inherits_shared_gateway_env(monkeypatch):
     )
 
     assert sorted(chat_llm._delegates_by_name) == [
-        "chat-gemma4-31b",
         "chat-gpt-oss-120b",
         "chat-gpt-oss-20b",
         "chat-grok-fast",
@@ -169,7 +168,6 @@ def test_example_router_config_inherits_shared_gateway_env(monkeypatch):
     ]
     assert sorted(ingest_llm._delegates_by_name) == [
         "ingest-deepseek-v4-flash",
-        "ingest-gemma4-31b",
         "ingest-gpt-oss-120b",
         "ingest-gpt-oss-20b",
         "ingest-longcat-flash",
