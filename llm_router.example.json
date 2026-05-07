@@ -91,7 +91,7 @@
       "ingest": {
         "enabled": true,
         "min_inflight": 2,
-        "max_inflight": 4,
+        "max_inflight": 3,
         "increase_every": 8,
         "latency_threshold_ms": 30000,
         "decrease_step": 1
@@ -115,10 +115,9 @@
         "ingest-longcat-flash",
         "ingest-gpt-oss-120b",
         "ingest-deepseek-v4-flash",
-        "ingest-qwen3-next-80b",
-        "ingest-qwen3-coder-next"
+        "ingest-qwen3-next-80b"
       ],
-      "max_inflight": 4,
+      "max_inflight": 3,
       "retry_budget": 2,
       "acquire_timeout_s": 15
     }

@@ -298,7 +298,6 @@ def test_example_router_config_inherits_shared_gateway_env(monkeypatch):
         "ingest-deepseek-v4-flash",
         "ingest-gpt-oss-120b",
         "ingest-longcat-flash",
-        "ingest-qwen3-coder-next",
         "ingest-qwen3-next-80b",
     ]
     assert all(
