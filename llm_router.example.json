@@ -73,15 +73,6 @@
       "cooldown_s": 45
     },
     {
-      "name": "ingest-qwen3-5-122b-a10b",
-      "model": "qwen/qwen3.5-122b-a10b",
-      "weight": 2,
-      "max_inflight": 1,
-      "timeout_s": 60,
-      "failure_threshold": 3,
-      "cooldown_s": 45
-    },
-    {
       "name": "ingest-qwen3-coder-next",
       "model": "qwen3-coder-next",
       "weight": 5,
@@ -89,15 +80,6 @@
       "timeout_s": 30,
       "failure_threshold": 3,
       "cooldown_s": 20
-    },
-    {
-      "name": "ingest-qwen3-coder-480b",
-      "model": "qwen3-coder:480b",
-      "weight": 4,
-      "max_inflight": 2,
-      "timeout_s": 35,
-      "failure_threshold": 3,
-      "cooldown_s": 25
     }
   ],
   "pools": {
@@ -118,9 +100,7 @@
         "ingest-gpt-oss-120b",
         "ingest-deepseek-v4-flash",
         "ingest-qwen3-next-80b",
-        "ingest-qwen3-5-122b-a10b",
-        "ingest-qwen3-coder-next",
-        "ingest-qwen3-coder-480b"
+        "ingest-qwen3-coder-next"
       ],
       "max_inflight": 3,
       "retry_budget": 2,
