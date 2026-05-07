@@ -238,11 +238,15 @@ curl -X POST http://localhost:8000/chat \
 ### 核心配置
 
 - `LLM_MODEL`, `OPENAI_API_KEY`, `OPENAI_API_BASE`
+- `CHAT_LLM_MODEL`, `INGEST_LLM_MODEL`（可选；分别覆盖在线查询与入库分析的模型池，仍兼容逗号分隔轮询）
+- `CHAT_LLM_API_BASE`, `CHAT_LLM_API_KEY`, `INGEST_LLM_API_BASE`, `INGEST_LLM_API_KEY`（可选；为 chat / ingest 指向不同 gateway group）
+- `LLM_ROUTER_CONFIG`, `LLM_ROUTER_CONFIG_FILE`（可选；启用结构化 router，支持权重、熔断、purpose 分池）
 - `EMBEDDING_MODEL`, `EMBEDDING_API_KEY`, `EMBEDDING_API_BASE`, `EMBEDDING_DIM`, `EMBEDDING_TIMEOUT`
 - `EMBEDDING_QUERY_PREFIX`, `EMBEDDING_DOCUMENT_PREFIX`（为空时保持旧行为；Jina retrieval 建议分别设为 `Query:` / `Document:`）
 - `RERANK_API_URL`, `RERANK_API_KEY`, `RERANK_MODEL`
 - `QDRANT_HOST`, `QDRANT_PORT`, `QDRANT_URL`, `QDRANT_API_KEY`, `COLLECTION_NAME`
 - `API_PUBLIC_PORT`, `QDRANT_PUBLIC_PORT`
+- `GUNICORN_WORKERS`, `GUNICORN_THREADS`（结构化 router 建议先用 `1` 个 worker，避免进程内熔断状态分裂）
 - `EMBEDDING_PUBLIC_PORT`, `EMBEDDING_GGUF_HOST_PATH`, `EMBEDDING_GGUF_FILE`
 - `SELF_HOSTED_EMBEDDING_MODEL`, `SELF_HOSTED_EMBEDDING_DIM`, `EMBEDDING_COLLECTION_NAME`
 - `APP_TIMEZONE`（默认 `Asia/Shanghai`）、`TZ`（容器系统时区，建议与 `APP_TIMEZONE` 一致）
@@ -331,6 +335,85 @@ pytest -q
 - `INSERT_BATCH_SIZE=8`
 
 这样可以避免大文档入库时单次 `/v1/embeddings` 请求超过客户端超时，导致 `/ingest` 或 `/ingest/text` 返回 `500`。
+
+## LLM 路由
+
+当前代码支持两种 LLM 路由模式：
+
+1. 兼容模式
+- 使用 `LLM_MODEL=a,b,c` 时，仍走旧的进程内轮询。
+- 可选地改为 `CHAT_LLM_MODEL` / `INGEST_LLM_MODEL`，把在线查询与入库分析拆成两个独立模型池。
+
+2. 结构化 router 模式
+- 通过 `LLM_ROUTER_CONFIG` 或 `LLM_ROUTER_CONFIG_FILE` 启用。
+- 若 deployment 未显式写 `api_base` / `api_key_env`，会继续沿用现有的 `LLM_API_BASE` / `LLM_API_KEY`，再回退到 `OPENAI_API_BASE` / `OPENAI_API_KEY`。
+- router 支持：
+  - `chat` / `ingest` purpose 分池
+  - deployment 权重
+  - least-inflight 选路
+  - 对 `429` / `503` / timeout 的熔断与 cooldown
+  - pool 级并发上限与 retry budget
+
+仓库内置了 [llm_router.example.json](./llm_router.example.json)，已经按当前生产思路拆好了 `chat` 与 `ingest` 两个池：
+
+- `chat`：`grok-4.20-fast`、`step-3.5-flash`、`LongCat-Flash-Chat`、`qwen-3-235b-a22b-instruct-2507`、`gpt-oss:120b`、`gemma4:31b`
+- `ingest`：`step-3.5-flash`、`LongCat-Flash-Chat`、`gpt-oss:120b`、`deepseek-v4-flash`、`nemotron-3-super`、`deepseek-v3.2`、`qwen3-next:80b`、`qwen/qwen3.5-122b-a10b`
+
+推荐把它复制成生产文件后，在 `.env` 中只加一行：
+
+```env
+LLM_ROUTER_CONFIG_FILE=./llm_router.json
+```
+
+若仍使用旧的多 worker Gunicorn，权重和熔断状态会按 worker 分裂；当前推荐把 `GUNICORN_WORKERS` 控制为 `1`，先保证 router 状态单一且可预测。
+
+示例片段：
+
+```json
+{
+  "deployments": [
+    {
+      "name": "chat-step-flash",
+      "model": "step-3.5-flash",
+      "weight": 6,
+      "max_inflight": 3,
+      "timeout_s": 25,
+      "failure_threshold": 3,
+      "cooldown_s": 20
+    },
+    {
+      "name": "ingest-deepseek-v4-flash",
+      "model": "deepseek-v4-flash",
+      "weight": 6,
+      "max_inflight": 2,
+      "timeout_s": 45,
+      "failure_threshold": 3,
+      "cooldown_s": 20
+    }
+  ],
+  "pools": {
+    "chat": {
+      "deployments": ["chat-step-flash"],
+      "max_inflight": 6,
+      "retry_budget": 1,
+      "acquire_timeout_s": 3
+    },
+    "ingest": {
+      "deployments": ["ingest-deepseek-v4-flash"],
+      "max_inflight": 2,
+      "retry_budget": 2,
+      "acquire_timeout_s": 15
+    }
+  }
+}
+```
+
+建议的初始策略：
+
+- `chat` 池把 `max_inflight` 控在 `6` 左右，优先稳定低延迟模型。
+- `ingest` 池把 `max_inflight` 控在 `2` 左右，只吃剩余容量，避免回填挤占在线查询。
+- 大模型或慢模型给更低 `weight` 与更小 `max_inflight`，让它们只在有余量时承接流量。
+- 如果某个 gateway alias 后面其实还是同一组 provider/key，router 只能减少抖动与失败放大，不能凭空创造 RPM。
 
 ## 关联文档
 

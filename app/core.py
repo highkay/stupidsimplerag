@@ -43,7 +43,7 @@ from app.models import (
     GroundingExcerpt,
 )
 from app.openai_utils import (
-    OpenAICompatibleLLM,
+    build_llm,
     get_openai_config,
     get_openai_kwargs,
 )
@@ -1424,10 +1424,8 @@ async def get_collection_metrics() -> dict:
     return metrics
 
 
-Settings.llm = OpenAICompatibleLLM(
-    model=os.getenv("LLM_MODEL"),
-    api_key=llm_key,
-    api_base=llm_base,
+Settings.llm = build_llm(
+    purpose="chat",
     temperature=0.1,
     context_window=llm_context_window,
 )

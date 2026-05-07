@@ -11,7 +11,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     TZ=Asia/Shanghai \
     APP_TIMEZONE=Asia/Shanghai \
-    GUNICORN_WORKERS=2 \
+    GUNICORN_WORKERS=1 \
     GUNICORN_THREADS=1
 
 # Runtime system deps only. Python deps should resolve from wheels.
@@ -54,4 +54,4 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 CMD curl -fsS http://127.0.0.1:8000/health || exit 1
 
 # Use Gunicorn + Uvicorn workers for production
-CMD ["sh", "-c", "gunicorn -k uvicorn.workers.UvicornWorker -w ${GUNICORN_WORKERS:-2} --threads ${GUNICORN_THREADS:-1} -b 0.0.0.0:8000 app.main:app --graceful-timeout 30 --timeout 120"]
+CMD ["sh", "-c", "gunicorn -k uvicorn.workers.UvicornWorker -w ${GUNICORN_WORKERS:-1} --threads ${GUNICORN_THREADS:-1} -b 0.0.0.0:8000 app.main:app --graceful-timeout 30 --timeout 120"]

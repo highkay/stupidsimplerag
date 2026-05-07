@@ -10,7 +10,7 @@ from chonkie import TokenChunker
 from llama_index.core.schema import TextNode
 
 from app.models import LLMAnalysis
-from app.openai_utils import OpenAICompatibleLLM, get_openai_kwargs
+from app.openai_utils import build_llm
 from app.preprocess import split_document_blocks, summarize_chunk_blocks
 from app.utils import extract_date_from_filename
 
@@ -25,11 +25,10 @@ _llm_retry_backoff = float(os.getenv("LLM_RETRY_BACKOFF", "1.5"))
 _llm_concurrency = int(os.getenv("LLM_CONCURRENCY", "10"))
 _llm_semaphore = asyncio.Semaphore(_llm_concurrency)
 
-extractor_llm = OpenAICompatibleLLM(
-    model=os.getenv("LLM_MODEL"),
+extractor_llm = build_llm(
+    purpose="ingest",
     temperature=0.1,
     context_window=_llm_context_window,
-    **get_openai_kwargs("LLM"),
 )
 
 chunker = TokenChunker(chunk_size=512, chunk_overlap=50)

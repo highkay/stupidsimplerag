@@ -60,6 +60,7 @@
 - `app/openai_utils.py`
   - API key/base 分派逻辑。
   - `OpenAICompatibleLLM` 支持多模型逗号轮询。
+  - `build_llm()` / `GatewayRoutedLLM` 支持 `chat` / `ingest` purpose 分池、权重、least-inflight 与熔断。
 
 - `app/utils.py`
   - 文件名日期提取：时间戳、`YYYYMMDD`、`MMDD`、两位年份兜底。
@@ -71,6 +72,7 @@
 - `preload_models.py`：预下载 FastEmbed 稀疏模型。
 - `Dockerfile`：使用 BuildKit cache mount 缓存 `apt`、`pip` 与 FastEmbed 构建依赖，并可用本地 `model_cache` 加速模型预热。
 - `docker-compose.llama-embedding.yml`：可选覆盖文件，增加独立 `llama.cpp` Embedding 服务、基于当前源码构建 `api` 镜像，并把 API 切到 1024 维自托管检索栈。
+- `llm_router.example.json`：结构化 LLM router 示例，默认沿用现有 `LLM_API_BASE` / `LLM_API_KEY` 或 `OPENAI_*`，仅拆分模型池与路由策略。
 
 ## 4. API 合同（当前实现）
 
@@ -178,6 +180,9 @@
 
 1. 模型与协议
 - `LLM_MODEL`, `OPENAI_API_KEY`, `OPENAI_API_BASE`
+- `CHAT_LLM_MODEL`, `INGEST_LLM_MODEL`
+- `CHAT_LLM_API_BASE`, `CHAT_LLM_API_KEY`, `INGEST_LLM_API_BASE`, `INGEST_LLM_API_KEY`
+- `LLM_ROUTER_CONFIG`, `LLM_ROUTER_CONFIG_FILE`
 - `EMBEDDING_MODEL`, `EMBEDDING_API_KEY`, `EMBEDDING_API_BASE`, `EMBEDDING_DIM`, `EMBEDDING_TIMEOUT`
 - `EMBEDDING_QUERY_PREFIX`, `EMBEDDING_DOCUMENT_PREFIX`
 - `RERANK_API_URL`, `RERANK_API_BASE`, `RERANK_API_KEY`, `RERANK_MODEL`, `RERANK_TIMEOUT`, `RERANK_RETURN_DOCUMENTS`
@@ -198,6 +203,7 @@
 
 5. Docker / 端口 / 自托管 Embedding
 - `API_PUBLIC_PORT`, `QDRANT_PUBLIC_PORT`, `EMBEDDING_PUBLIC_PORT`
+- `GUNICORN_WORKERS`, `GUNICORN_THREADS`
 - `EMBEDDING_GGUF_HOST_PATH`, `EMBEDDING_GGUF_FILE`, `EMBEDDING_CONTEXT_WINDOW`, `EMBEDDING_UBATCH`
 - `SELF_HOSTED_EMBEDDING_MODEL`, `SELF_HOSTED_EMBEDDING_DIM`, `EMBEDDING_COLLECTION_NAME`
 

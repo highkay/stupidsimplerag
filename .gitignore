@@ -2,6 +2,7 @@ model_cache/*
 !model_cache/.keep
 qdrant_data
 .env
+llm_router.json
 __pycache__
 .pytest_cache
 .ruff_cache

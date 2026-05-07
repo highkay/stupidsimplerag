@@ -1,0 +1,160 @@
+{
+  "deployments": [
+    {
+      "name": "chat-grok-fast",
+      "model": "grok-4.20-fast",
+      "weight": 5,
+      "max_inflight": 2,
+      "timeout_s": 30,
+      "failure_threshold": 3,
+      "cooldown_s": 30
+    },
+    {
+      "name": "chat-step-flash",
+      "model": "step-3.5-flash",
+      "weight": 6,
+      "max_inflight": 3,
+      "timeout_s": 25,
+      "failure_threshold": 3,
+      "cooldown_s": 20
+    },
+    {
+      "name": "chat-longcat-flash",
+      "model": "LongCat-Flash-Chat",
+      "weight": 4,
+      "max_inflight": 2,
+      "timeout_s": 25,
+      "failure_threshold": 3,
+      "cooldown_s": 20
+    },
+    {
+      "name": "chat-qwen-235b",
+      "model": "qwen-3-235b-a22b-instruct-2507",
+      "weight": 3,
+      "max_inflight": 2,
+      "timeout_s": 35,
+      "failure_threshold": 3,
+      "cooldown_s": 30
+    },
+    {
+      "name": "chat-gpt-oss-120b",
+      "model": "gpt-oss:120b",
+      "weight": 2,
+      "max_inflight": 1,
+      "timeout_s": 45,
+      "failure_threshold": 3,
+      "cooldown_s": 45
+    },
+    {
+      "name": "chat-gemma4-31b",
+      "model": "gemma4:31b",
+      "weight": 2,
+      "max_inflight": 1,
+      "timeout_s": 35,
+      "failure_threshold": 3,
+      "cooldown_s": 30
+    },
+    {
+      "name": "ingest-step-flash",
+      "model": "step-3.5-flash",
+      "weight": 6,
+      "max_inflight": 2,
+      "timeout_s": 45,
+      "failure_threshold": 3,
+      "cooldown_s": 20
+    },
+    {
+      "name": "ingest-longcat-flash",
+      "model": "LongCat-Flash-Chat",
+      "weight": 5,
+      "max_inflight": 2,
+      "timeout_s": 45,
+      "failure_threshold": 3,
+      "cooldown_s": 20
+    },
+    {
+      "name": "ingest-gpt-oss-120b",
+      "model": "gpt-oss:120b",
+      "weight": 2,
+      "max_inflight": 1,
+      "timeout_s": 60,
+      "failure_threshold": 3,
+      "cooldown_s": 45
+    },
+    {
+      "name": "ingest-deepseek-v4-flash",
+      "model": "deepseek-v4-flash",
+      "weight": 6,
+      "max_inflight": 2,
+      "timeout_s": 45,
+      "failure_threshold": 3,
+      "cooldown_s": 20
+    },
+    {
+      "name": "ingest-nemotron-3-super",
+      "model": "nemotron-3-super",
+      "weight": 3,
+      "max_inflight": 1,
+      "timeout_s": 60,
+      "failure_threshold": 3,
+      "cooldown_s": 45
+    },
+    {
+      "name": "ingest-deepseek-v3-2",
+      "model": "deepseek-v3.2",
+      "weight": 3,
+      "max_inflight": 1,
+      "timeout_s": 60,
+      "failure_threshold": 3,
+      "cooldown_s": 45
+    },
+    {
+      "name": "ingest-qwen3-next-80b",
+      "model": "qwen3-next:80b",
+      "weight": 2,
+      "max_inflight": 1,
+      "timeout_s": 60,
+      "failure_threshold": 3,
+      "cooldown_s": 45
+    },
+    {
+      "name": "ingest-qwen3-5-122b-a10b",
+      "model": "qwen/qwen3.5-122b-a10b",
+      "weight": 2,
+      "max_inflight": 1,
+      "timeout_s": 60,
+      "failure_threshold": 3,
+      "cooldown_s": 45
+    }
+  ],
+  "pools": {
+    "chat": {
+      "deployments": [
+        "chat-grok-fast",
+        "chat-step-flash",
+        "chat-longcat-flash",
+        "chat-qwen-235b",
+        "chat-gpt-oss-120b",
+        "chat-gemma4-31b"
+      ],
+      "max_inflight": 6,
+      "retry_budget": 1,
+      "acquire_timeout_s": 3
+    },
+    "ingest": {
+      "deployments": [
+        "ingest-step-flash",
+        "ingest-longcat-flash",
+        "ingest-gpt-oss-120b",
+        "ingest-deepseek-v4-flash",
+        "ingest-nemotron-3-super",
+        "ingest-deepseek-v3-2",
+        "ingest-qwen3-next-80b",
+        "ingest-qwen3-5-122b-a10b"
+      ],
+      "max_inflight": 2,
+      "retry_budget": 2,
+      "acquire_timeout_s": 15
+    }
+  }
+}
