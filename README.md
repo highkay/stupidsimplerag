@@ -240,7 +240,7 @@ curl -X POST http://localhost:8000/chat \
 - `LLM_MODEL`, `OPENAI_API_KEY`, `OPENAI_API_BASE`
 - `CHAT_LLM_MODEL`, `INGEST_LLM_MODEL`（可选；分别覆盖在线查询与入库分析的模型池，仍兼容逗号分隔轮询）
 - `CHAT_LLM_API_BASE`, `CHAT_LLM_API_KEY`, `INGEST_LLM_API_BASE`, `INGEST_LLM_API_KEY`（可选；为 chat / ingest 指向不同 gateway group）
-- `LLM_ROUTER_CONFIG`, `LLM_ROUTER_CONFIG_FILE`（可选；启用结构化 router，支持权重、熔断、purpose 分池）
+- `LLM_ROUTER_CONFIG`, `LLM_ROUTER_CONFIG_FILE`, `LLM_ROUTER_STATS_INTERVAL`（可选；启用结构化 router，支持权重、熔断、purpose 分池；`LLM_ROUTER_STATS_INTERVAL` 控制周期性 deployment 摘要日志）
 - `EMBEDDING_MODEL`, `EMBEDDING_API_KEY`, `EMBEDDING_API_BASE`, `EMBEDDING_DIM`, `EMBEDDING_TIMEOUT`
 - `EMBEDDING_QUERY_PREFIX`, `EMBEDDING_DOCUMENT_PREFIX`（为空时保持旧行为；Jina retrieval 建议分别设为 `Query:` / `Document:`）
 - `RERANK_API_URL`, `RERANK_API_KEY`, `RERANK_MODEL`
@@ -386,6 +386,14 @@ LLM_ROUTER_CONFIG_FILE=./llm_router.json
 ```
 
 若仍使用旧的多 worker Gunicorn，权重和熔断状态会按 worker 分裂；当前推荐把 `GUNICORN_WORKERS` 控制为 `1`，先保证 router 状态单一且可预测。
+
+如需观察真实流量下各 deployment 的表现，可临时设置：
+
+```env
+LLM_ROUTER_STATS_INTERVAL=8
+```
+
+router 会按固定完成事件数输出一次 pool 摘要，包含每个 deployment 的累计请求数、成功数、失败数、可重试失败数、EWMA 延迟、熔断状态与最近错误。
 
 示例片段：
 

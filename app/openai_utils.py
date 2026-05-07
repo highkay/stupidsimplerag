@@ -181,6 +181,10 @@ class _DeploymentRuntimeState:
     half_open_successes: int = 0
     ewma_latency_ms: float = 0.0
     last_error: str = ""
+    total_attempts: int = 0
+    total_successes: int = 0
+    total_failures: int = 0
+    retryable_failures: int = 0
 
 
 @dataclass
@@ -226,6 +230,8 @@ class LLMRouterRuntime:
         }
         self._pool_states = {pool_name: _PoolRuntimeState() for pool_name in config.pools}
         self._lock = threading.Lock()
+        self._stats_interval = max(0, int(os.getenv("LLM_ROUTER_STATS_INTERVAL", "20")))
+        self._stats_events = 0
 
     @property
     def deployments(self) -> Dict[str, LLMDeploymentConfig]:
@@ -277,6 +283,8 @@ class LLMRouterRuntime:
             self._release_locked(lease)
             state = self._deployment_states[lease.deployment_name]
             deployment = self._deployments[lease.deployment_name]
+            state.total_attempts += 1
+            state.total_successes += 1
             state.last_error = ""
             state.consecutive_failures = 0
             latency_ms = max(latency_s * 1000.0, 0.0)
@@ -291,6 +299,8 @@ class LLMRouterRuntime:
                     state.circuit_state = "closed"
                     state.half_open_successes = 0
                     state.opened_until = 0.0
+            self._stats_events += 1
+            self._maybe_log_pool_stats_locked(lease.pool_name)
 
     async def release_failure(self, lease: _RouterLease, latency_s: float, exc: Exception) -> None:
         self.release_failure_sync(lease, latency_s, exc)
@@ -301,6 +311,8 @@ class LLMRouterRuntime:
             self._release_locked(lease)
             state = self._deployment_states[lease.deployment_name]
             deployment = self._deployments[lease.deployment_name]
+            state.total_attempts += 1
+            state.total_failures += 1
             state.last_error = str(exc)
             latency_ms = max(latency_s * 1000.0, 0.0)
             if state.ewma_latency_ms <= 0:
@@ -309,8 +321,11 @@ class LLMRouterRuntime:
                 state.ewma_latency_ms = (state.ewma_latency_ms * 0.7) + (latency_ms * 0.3)
 
             if not retryable:
+                self._stats_events += 1
+                self._maybe_log_pool_stats_locked(lease.pool_name)
                 return
 
+            state.retryable_failures += 1
             state.consecutive_failures += 1
             state.half_open_successes = 0
             if state.circuit_state == "half_open" or state.consecutive_failures >= deployment.failure_threshold:
@@ -323,6 +338,8 @@ class LLMRouterRuntime:
                     deployment.cooldown_s,
                     exc,
                 )
+            self._stats_events += 1
+            self._maybe_log_pool_stats_locked(lease.pool_name)
 
     def _release_locked(self, lease: _RouterLease) -> None:
         deployment_state = self._deployment_states[lease.deployment_name]
@@ -371,6 +388,35 @@ class LLMRouterRuntime:
         self._deployment_states[selected].inflight += 1
         pool_state.inflight += 1
         return _RouterLease(pool_name=pool_name, deployment_name=selected, acquired_at=now)
+
+    def _maybe_log_pool_stats_locked(self, pool_name: str) -> None:
+        if self._stats_interval <= 0 or self._stats_events % self._stats_interval != 0:
+            return
+        pool = self.config.pools[pool_name]
+        deployment_summaries: list[str] = []
+        for deployment_name in pool.deployments:
+            state = self._deployment_states[deployment_name]
+            if state.total_attempts <= 0 and state.inflight <= 0 and not state.last_error:
+                continue
+            parts = [
+                f"req={state.total_attempts}",
+                f"ok={state.total_successes}",
+                f"fail={state.total_failures}",
+                f"retry={state.retryable_failures}",
+                f"ewma_ms={state.ewma_latency_ms:.0f}",
+                f"st={state.circuit_state}",
+                f"inflight={state.inflight}",
+            ]
+            if state.last_error:
+                parts.append(f"last={state.last_error[:80]}")
+            deployment_summaries.append(f"{deployment_name}{{{' '.join(parts)}}}")
+        logger.info(
+            "LLM router stats pool=%s total_events=%d pool_inflight=%d deployments=%s",
+            pool_name,
+            self._stats_events,
+            self._pool_states[pool_name].inflight,
+            "; ".join(deployment_summaries) if deployment_summaries else "none",
+        )
 
 
 class OpenAICompatibleLLM(LlamaOpenAI):

@@ -55,6 +55,43 @@ def test_router_runtime_opens_circuit_and_skips_failed_deployment():
     assert second.deployment_name != first.deployment_name
 
 
+def test_router_runtime_logs_periodic_stats(monkeypatch):
+    monkeypatch.setenv("LLM_ROUTER_STATS_INTERVAL", "2")
+    logged_messages = []
+
+    def fake_info(message, *args, **kwargs):
+        if args:
+            message = message % args
+        logged_messages.append(str(message))
+
+    monkeypatch.setattr(openai_utils.logger, "info", fake_info)
+    config = openai_utils.LLMRouterConfig.model_validate(
+        {
+            "deployments": [
+                {
+                    "name": "chat-primary",
+                    "model": "grok-4.20-fast",
+                    "weight": 1,
+                    "max_inflight": 1,
+                    "failure_threshold": 2,
+                    "cooldown_s": 30,
+                    "purposes": ["chat"],
+                }
+            ]
+        }
+    )
+    runtime = openai_utils.LLMRouterRuntime(config)
+
+    first = runtime.acquire_sync("chat")
+    runtime.release_success_sync(first, 0.25)
+    second = runtime.acquire_sync("chat")
+    runtime.release_success_sync(second, 0.50)
+
+    output = "\n".join(logged_messages)
+    assert "LLM router stats pool=chat" in output
+    assert "chat-primary{req=2 ok=2 fail=0" in output
+
+
 def test_build_llm_uses_router_config_file_for_purpose_pools(monkeypatch, tmp_path):
     config_path = tmp_path / "llm_router.json"
     config_path.write_text(
