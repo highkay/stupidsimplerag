@@ -1,48 +1,64 @@
-<div class="overflow-x-auto">
-    <table class="table table-zebra w-full">
-        <thead>
-            <tr>
-                <th>Filename</th>
-                <th>Scope</th>
-                <th>Date</th>
-                <th>Chunks</th>
-                <th class="text-right">Actions</th>
-            </tr>
-        </thead>
-        <tbody id="document-table-body">
-            {% if documents %}
-                {% if documents|length >= 1000 %}
+<div class="surface-card">
+    <div class="section-heading">
+        <div>
+            <span class="soft-label">当前文档</span>
+            <h2 class="section-title">共 <span data-document-count-label>{{ documents | length }} 条</span>。</h2>
+        </div>
+        <span class="badge badge-outline">filename + scope</span>
+    </div>
+
+    <div class="overflow-x-auto">
+        <table class="table table-sm">
+            <thead>
                 <tr>
-                    <td colspan="5" class="bg-warning/10 text-warning text-xs py-2 px-4 italic">
-                        注意：仅显示前 1000 个文档。如需精确管理，请使用 API 或搜索功能。
-                    </td>
+                    <th>文件名</th>
+                    <th>Scope</th>
+                    <th>日期</th>
+                    <th>切片</th>
+                    <th class="text-right">操作</th>
                 </tr>
+            </thead>
+            <tbody id="document-table-body">
+                {% if documents %}
+                    {% if documents|length >= 1000 %}
+                    <tr>
+                        <td colspan="5" class="bg-warning/10 text-warning text-xs py-2 px-4 italic">
+                            当前仅显示前 1000 条；更细的筛选请走 API。
+                        </td>
+                    </tr>
+                    {% endif %}
+                    {% for doc in documents %}
+                    <tr
+                        id="doc-row-{{ loop.index }}"
+                        data-document-row
+                        data-search="{{ (doc.filename ~ ' ' ~ (doc.scope or '') ~ ' ' ~ (doc.date or '')) | lower }}"
+                    >
+                        <td class="font-medium">{{ doc.filename }}</td>
+                        <td>
+                            <span class="badge badge-outline badge-sm">{{ doc.scope or "∅" }}</span>
+                        </td>
+                        <td>{{ doc.date or "Unknown" }}</td>
+                        <td><span class="badge badge-ghost">{{ doc.chunks }}</span></td>
+                        <td class="text-right">
+                            <button
+                                class="btn btn-error btn-xs"
+                                hx-delete="/ui/documents/{{ doc.filename }}{% if doc.scope %}?scope={{ doc.scope | urlencode }}{% endif %}"
+                                hx-target="#document-list-container"
+                                hx-swap="innerHTML transition:true"
+                                hx-confirm="确认删除 {{ doc.filename }}{% if doc.scope %}（scope={{ doc.scope }}）{% endif %} 吗？"
+                                data-busy-text="正在删除文档..."
+                            >
+                                删除
+                            </button>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                {% else %}
+                    <tr>
+                        <td colspan="5" class="text-center py-6 text-base-content/50">暂无文档。</td>
+                    </tr>
                 {% endif %}
-                {% for doc in documents %}
-                <tr id="doc-row-{{ loop.index }}">
-                    <td class="font-medium">{{ doc.filename }}</td>
-                    <td>{{ doc.scope or '∅' }}</td>
-                    <td>{{ doc.date or 'Unknown' }}</td>
-                    <td>
-                        <div class="badge badge-ghost">{{ doc.chunks }}</div>
-                    </td>
-                    <td class="text-right">
-                        <button 
-                            class="btn btn-error btn-xs"
-                            hx-delete="/ui/documents/{{ doc.filename }}{% if doc.scope %}?scope={{ doc.scope | urlencode }}{% endif %}"
-                            hx-target="#document-list-container"
-                            hx-confirm="Are you sure you want to delete '{{ doc.filename }}'{% if doc.scope %} in scope '{{ doc.scope }}'{% endif %}?"
-                        >
-                            Delete
-                        </button>
-                    </td>
-                </tr>
-                {% endfor %}
-            {% else %}
-                <tr>
-                    <td colspan="5" class="text-center py-4 text-base-content/50">No documents found.</td>
-                </tr>
-            {% endif %}
-        </tbody>
-    </table>
+            </tbody>
+        </table>
+    </div>
 </div>

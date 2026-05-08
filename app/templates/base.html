@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="zh-CN" data-theme="light">
+<html lang="zh-CN" data-theme="lofi">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -9,45 +9,68 @@
     <script src="https://unpkg.com/htmx.org@2.0.3"></script>
     <script src="https://unpkg.com/htmx.org/dist/ext/loading-states.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.7/dist/cdn.min.js" defer></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&family=Noto+Serif+SC:wght@500;700&display=swap" rel="stylesheet">
     <link rel="icon" type="image/svg+xml" href="{{ url_for('static', path='favicon.svg') }}">
     <link rel="stylesheet" href="{{ url_for('static', path='styles.css') }}">
     <script>
       document.addEventListener("DOMContentLoaded", () => {
-        htmx.config.timeout = 240000; // long-poll friendly
+        htmx.config.timeout = 240000;
       });
     </script>
 </head>
-<body class="font-body bg-base-200 text-base-content" x-data="appShell()" x-init="init()">
+<body class="shell-body" x-data="appShell()" x-init="init()">
+    <div class="shell-backdrop" aria-hidden="true">
+        <div class="shell-glow shell-glow-a"></div>
+        <div class="shell-glow shell-glow-b"></div>
+    </div>
+
     <div class="min-h-screen flex flex-col relative">
-        <header class="backdrop-blur bg-base-100/80 border-b border-base-200 sticky top-0 z-20">
-            <div class="container mx-auto px-4 py-3 flex items-center justify-between gap-4">
-                <div class="flex items-center gap-3">
-                    <img src="{{ url_for('static', path='favicon.svg') }}" alt="logo" class="w-10 h-10">
-                    <div>
-                        <div class="text-xl font-semibold leading-tight">stupidsimplerag</div>
-                        <p class="text-sm text-base-content/60">专用 · 高效 · 省资源</p>
+        <header class="shell-header sticky top-0 z-20">
+            <div class="container mx-auto px-4 py-4 space-y-4">
+                <div class="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+                    <a href="/" class="brand-lockup">
+                        <span class="brand-mark">
+                            <img src="{{ url_for('static', path='favicon.svg') }}" alt="logo" class="w-8 h-8">
+                        </span>
+                        <span>
+                            <span class="brand-title">stupidsimplerag</span>
+                            <span class="brand-subtitle">Ingest · Search · Grounding</span>
+                        </span>
+                    </a>
+                    <div class="status-strip">
+                        <span class="status-pill">单机 RAG</span>
+                        <span class="status-pill">HTMX 控制台</span>
+                        <span class="status-pill">Qdrant Hybrid</span>
                     </div>
                 </div>
-                <nav class="tabs tabs-boxed bg-base-200/80 p-1">
-                    <a class="tab {% if request.url.path == '/' %}tab-active{% endif %}" href="/">指标</a>
-                    <a class="tab {% if request.url.path.startswith('/ui/upload') and not request.url.path.endswith('/batch') %}tab-active{% endif %}" href="/ui/upload">手动上传</a>
-                    <a class="tab {% if request.url.path.startswith('/ui/upload/batch') %}tab-active{% endif %}" href="/ui/upload/batch">批量上传</a>
-                    <a class="tab {% if request.url.path.startswith('/ui/chat') %}tab-active{% endif %}" href="/ui/chat">查询</a>
+
+                <nav class="console-nav" aria-label="控制台导航">
+                    <a class="console-tab {% if request.url.path == '/' %}is-active{% endif %}" href="/">总览</a>
+                    <a class="console-tab {% if request.url.path == '/ui/upload' %}is-active{% endif %}" href="/ui/upload">单文件入库</a>
+                    <a class="console-tab {% if request.url.path == '/ui/upload/batch' %}is-active{% endif %}" href="/ui/upload/batch">批量入库</a>
+                    <a class="console-tab {% if request.url.path.startswith('/ui/chat') %}is-active{% endif %}" href="/ui/chat">检索</a>
+                    <a class="console-tab {% if request.url.path.startswith('/ui/grounding') %}is-active{% endif %}" href="/ui/grounding">Grounding</a>
+                    <a class="console-tab {% if request.url.path.startswith('/ui/documents') %}is-active{% endif %}" href="/ui/documents/manage">文档</a>
                 </nav>
             </div>
         </header>
 
-        <main id="page-root" class="flex-1 container mx-auto px-4 py-6 space-y-6 relative z-10">
+        <main id="page-root" class="flex-1 container mx-auto px-4 py-6 lg:py-8 space-y-6 relative z-10">
             {% block content %}{% endblock %}
         </main>
 
-        <footer class="px-4 py-6 border-t border-base-200 text-sm text-base-content/70 bg-base-100/80 backdrop-blur">
-            <div class="container mx-auto flex items-center justify-between">
-                <div>LLM 预处理 · 混合检索 · Qdrant on-disk</div>
-                <div class="flex items-center gap-3">
+        <footer class="shell-footer">
+            <div class="container mx-auto px-4 py-6 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                <div>
+                    <div class="footer-title">控制台只保留关键事实和关键入口。</div>
+                    <div class="footer-copy">上传后直接拿 `doc_hash` 做 grounding；检索页可切标准模式或 LOD 两阶段。</div>
+                </div>
+                <div class="footer-badges">
                     <span class="badge badge-outline">FastAPI</span>
                     <span class="badge badge-outline">htmx 2.x</span>
-                    <span class="badge badge-outline">daisyUI</span>
+                    <span class="badge badge-outline">DaisyUI</span>
                 </div>
             </div>
         </footer>
@@ -55,22 +78,20 @@
 
     <div
         id="global-indicator"
-        class="htmx-indicator fixed inset-0 z-30 hidden items-center justify-center bg-base-300/70 backdrop-blur"
+        class="htmx-indicator fixed inset-0 z-30 hidden items-center justify-center bg-slate-950/25 backdrop-blur-sm"
         aria-live="assertive"
     >
-        <div class="card w-80 bg-base-100 shadow-2xl animate-pulse">
-            <div class="card-body items-center text-center">
-                <span class="loading loading-spinner loading-lg text-primary"></span>
-                <p class="text-lg font-semibold" x-text="busyText"></p>
-                <p class="text-sm text-base-content/60">长时间请求已升级为异步处理，稍等片刻</p>
-            </div>
+        <div class="loading-panel">
+            <span class="loading loading-spinner loading-lg text-primary"></span>
+            <p class="loading-title" x-text="busyText"></p>
+            <p class="loading-copy">长请求保持页面停留即可，不需要刷新。</p>
         </div>
     </div>
 
-    <div class="toast toast-end z-40" x-show="toast" x-transition>
-        <div class="alert alert-info shadow-lg">
+    <div class="toast toast-end z-40" x-show="toast" x-transition.opacity.duration.200ms>
+        <div class="alert alert-info shadow-xl">
             <div>
-                <span class="text-lg" x-text="toast?.title"></span>
+                <span class="text-base font-semibold" x-text="toast?.title"></span>
                 <p class="text-sm" x-text="toast?.body"></p>
             </div>
         </div>
@@ -94,6 +115,12 @@
               const msg = event.detail?.xhr?.responseText || "请稍后再试";
               this.showToast("请求失败", msg);
             });
+            document.body.addEventListener("htmx:afterSwap", () => {
+              const input = document.querySelector("[data-document-filter]");
+              if (input) {
+                window.filterDocumentRows(input.value);
+              }
+            });
           },
           showToast(title, body) {
             this.toast = { title, body };
@@ -101,6 +128,24 @@
           },
         };
       }
+
+      window.filterDocumentRows = function(value) {
+        const query = (value || "").trim().toLowerCase();
+        const rows = Array.from(document.querySelectorAll("[data-document-row]"));
+        let visible = 0;
+        rows.forEach((row) => {
+          const haystack = row.dataset.search || "";
+          const matched = !query || haystack.includes(query);
+          row.classList.toggle("hidden", !matched);
+          if (matched) {
+            visible += 1;
+          }
+        });
+        const labels = document.querySelectorAll("[data-document-count-label]");
+        labels.forEach((label) => {
+          label.textContent = `${visible} 条`;
+        });
+      };
     </script>
 </body>
 </html>

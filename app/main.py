@@ -3,6 +3,7 @@ import datetime
 import hashlib
 import logging
 import os
+import re
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -228,6 +229,57 @@ def _parse_bool(raw: Optional[str]) -> bool:
         return False
     value = str(raw).strip().lower()
     return value in ("1", "true", "on", "yes")
+
+
+def _split_compact_values(raw: Optional[str]) -> List[str]:
+    if not raw:
+        return []
+    values = [item.strip() for item in re.split(r"[,，;；、\t]+", raw) if item.strip()]
+    deduped: List[str] = []
+    for value in values:
+        if value not in deduped:
+            deduped.append(value)
+    return deduped
+
+
+def _parse_grounding_candidates(raw: Optional[str]) -> List[dict]:
+    if not raw:
+        return []
+
+    parsed: List[dict] = []
+    for line in raw.splitlines():
+        text = line.strip()
+        if not text or text.startswith("#"):
+            continue
+
+        parts = [part.strip() for part in text.split("|")]
+        candidate: dict = {}
+        aliases: List[str] = []
+        candidate_type: Optional[str] = None
+
+        if len(parts) == 1:
+            candidate["name"] = parts[0]
+        elif len(parts) == 2:
+            candidate["name"] = parts[0]
+            aliases = _split_compact_values(parts[1])
+        elif len(parts) == 3:
+            candidate["identifier"] = parts[0] or None
+            candidate["name"] = parts[1] or None
+            aliases = _split_compact_values(parts[2])
+        else:
+            candidate["identifier"] = parts[0] or None
+            candidate["name"] = parts[1] or None
+            aliases = _split_compact_values(parts[2])
+            candidate_type = parts[3] or None
+
+        if aliases:
+            candidate["aliases"] = aliases
+        if candidate_type:
+            candidate["candidate_type"] = candidate_type
+        if candidate.get("identifier") or candidate.get("name"):
+            parsed.append(candidate)
+
+    return parsed
 
 
 def _log_retry(retry_state: RetryCallState) -> None:
@@ -889,6 +941,7 @@ async def dashboard_page(request: Request) -> HTMLResponse:
         "top_n_rerank": int(os.getenv("TOP_N_RERANK", "20")),
         "final_top_k": int(os.getenv("FINAL_TOP_K", "10")),
         "batch_concurrency": BATCH_INGEST_CONCURRENCY,
+        "max_batch_files": MAX_BATCH_FILES,
     }
     context = {
         "metrics": metrics,
@@ -911,6 +964,34 @@ async def upload_batch_page(request: Request) -> HTMLResponse:
 @app.get("/ui/chat", response_class=HTMLResponse)
 async def chat_page(request: Request) -> HTMLResponse:
     return templates.TemplateResponse(request, "chat.html")
+
+
+@app.get("/ui/grounding", response_class=HTMLResponse)
+async def grounding_page(request: Request) -> HTMLResponse:
+    return templates.TemplateResponse(
+        request,
+        "grounding.html",
+        {
+            "form_data": {
+                "doc_hash": "",
+                "filename": "",
+                "scope": "",
+                "candidates_text": "",
+                "max_excerpts": 3,
+                "skip_rerank": False,
+            }
+        },
+    )
+
+
+@app.get("/ui/documents/manage", response_class=HTMLResponse)
+async def documents_page(request: Request) -> HTMLResponse:
+    docs = await list_all_documents()
+    return templates.TemplateResponse(
+        request,
+        "documents.html",
+        {"documents": docs},
+    )
 
 
 @app.post("/ui/ingest", response_class=HTMLResponse)
@@ -959,6 +1040,7 @@ async def upload_batch_via_ui(
 async def chat_via_ui(
     request: Request,
     query: str = Form(...),
+    query_mode: Optional[str] = Form("chat"),
     start_date: Optional[str] = Form(None),
     end_date: Optional[str] = Form(None),
     filename: Optional[str] = Form(None),
@@ -969,6 +1051,7 @@ async def chat_via_ui(
     skip_generation: Optional[str] = Form(None),
     scope: Optional[str] = Form(None),
 ) -> HTMLResponse:
+    query_mode = (query_mode or "chat").strip().lower()
     req_body = ChatRequest(
         query=query,
         start_date=start_date or None,
@@ -983,9 +1066,58 @@ async def chat_via_ui(
     )
     is_htmx = _is_htmx(request)
     template_name = "partials/chat_result.html" if is_htmx else "chat.html"
-    context = {}
+    context = {"query_mode": query_mode}
     try:
-        result = await chat_api(req_body)
+        if query_mode == "lod":
+            result = await chat_lod_api(req_body)
+        else:
+            result = await chat_api(req_body)
+        context["result"] = result.model_dump()
+    except HTTPException as exc:
+        context["error"] = exc.detail
+    except Exception as exc:
+        context["error"] = str(exc)
+    return templates.TemplateResponse(request, template_name, context)
+
+
+@app.post("/ui/grounding/query", response_class=HTMLResponse)
+async def grounding_via_ui(
+    request: Request,
+    doc_hash: Optional[str] = Form(None),
+    filename: Optional[str] = Form(None),
+    scope: Optional[str] = Form(None),
+    candidates_text: Optional[str] = Form(None),
+    max_excerpts: int = Form(3),
+    skip_rerank: Optional[str] = Form(None),
+) -> HTMLResponse:
+    is_htmx = _is_htmx(request)
+    template_name = "partials/grounding_result.html" if is_htmx else "grounding.html"
+    normalized_scope = _normalize_scope(scope)
+    context = {
+        "form_data": {
+            "doc_hash": (doc_hash or "").strip(),
+            "filename": (filename or "").strip(),
+            "scope": normalized_scope or "",
+            "candidates_text": candidates_text or "",
+            "max_excerpts": max_excerpts,
+            "skip_rerank": _parse_bool(skip_rerank),
+        }
+    }
+    try:
+        request_body = GroundingRequest.model_validate(
+            {
+                "document": {
+                    "doc_hash": (doc_hash or "").strip() or None,
+                    "filename": (filename or "").strip() or None,
+                    "scope": normalized_scope,
+                },
+                "scope": normalized_scope,
+                "candidates": _parse_grounding_candidates(candidates_text),
+                "max_excerpts": max_excerpts,
+                "skip_rerank": _parse_bool(skip_rerank),
+            }
+        )
+        result = await grounding_api(request_body)
         context["result"] = result.model_dump()
     except HTTPException as exc:
         context["error"] = exc.detail

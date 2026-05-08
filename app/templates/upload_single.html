@@ -1,78 +1,80 @@
 {% extends "base.html" %}
 
 {% block content %}
-<section class="grid gap-6 lg:grid-cols-12">
-    <div class="lg:col-span-7">
-        <div class="card bg-base-100 shadow-xl ring-1 ring-base-200">
-            <div class="card-body space-y-4">
-                <div class="flex items-center justify-between">
-                    <div>
-                        <h2 class="card-title text-lg">手动上传 Markdown</h2>
-                        <p class="text-sm text-base-content/70">LLM 摘要 / 表格解读 / 同义词提炼后自动入库 Qdrant</p>
-                    </div>
-                    <div class="badge badge-primary badge-outline">Ingest</div>
-                </div>
-                <form
-                    method="post"
-                    action="/ui/ingest"
-                    hx-post="/ui/ingest"
-                    hx-target="#upload-result"
-                    hx-swap="innerHTML transition:true"
-                    hx-indicator="#global-indicator"
-                    hx-encoding="multipart/form-data"
-                    hx-sync="closest form:replace"
-                    hx-disabled-elt="fieldset, button"
-                    enctype="multipart/form-data"
-                    data-busy-text="正在分析与入库..."
-                    class="space-y-4"
-                >
-                    <fieldset class="space-y-3">
-                        <label class="form-control">
-                            <div class="label">
-                                <span class="label-text">选择 Markdown 文件</span>
-                                <span class="label-text-alt text-primary">只接受 .md</span>
-                            </div>
-                            <input type="file" id="file" name="file" accept=".md" class="file-input file-input-bordered w-full" required>
-                        </label>
-
-                        <label class="form-control">
-                            <div class="label">
-                                <span class="label-text">Scope</span>
-                                <span class="label-text-alt text-base-content/50">可选命名空间</span>
-                            </div>
-                            <input type="text" name="scope" placeholder="reports/2026" class="input input-bordered w-full">
-                        </label>
-
-                        <div class="form-control w-fit">
-                            <label class="label cursor-pointer gap-4">
-                                <span class="label-text font-medium text-warning">覆盖更新已存在的文档</span>
-                                <input type="checkbox" name="force_update" value="true" class="checkbox checkbox-warning checkbox-sm">
-                            </label>
-                            <span class="text-[10px] text-base-content/50 px-1">若开启，同名旧文档的所有切片将被删除并替换。</span>
-                        </div>
-                    </fieldset>
-                    <div class="flex items-center justify-between gap-3">
-                        <p class="text-xs text-base-content/60">文件读取后由后端执行切分 + 预处理 + Qdrant 入库。</p>
-                        <button type="submit" class="btn btn-primary">开始入库</button>
-                    </div>
-                </form>
+<section class="grid gap-6 xl:grid-cols-[0.95fr_1.05fr]">
+    <div class="surface-card">
+        <div class="section-heading">
+            <div>
+                <span class="soft-label">单文件入库</span>
+                <h1 class="section-title">上传后直接拿到 `doc_hash`，后续可用来做 grounding。</h1>
             </div>
+            <span class="badge badge-primary badge-outline">Ingest</span>
         </div>
+
+        <form
+            method="post"
+            action="/ui/ingest"
+            hx-post="/ui/ingest"
+            hx-target="#upload-result"
+            hx-swap="innerHTML transition:true"
+            hx-indicator="#global-indicator"
+            hx-encoding="multipart/form-data"
+            hx-sync="closest form:replace"
+            hx-disabled-elt="fieldset, button"
+            enctype="multipart/form-data"
+            data-busy-text="正在分析并入库..."
+            class="space-y-5"
+        >
+            <fieldset class="space-y-4">
+                <label class="form-control">
+                    <div class="label px-0">
+                        <span class="label-text font-medium">文件</span>
+                        <span class="label-text-alt">支持 `.md` / `.txt`</span>
+                    </div>
+                    <input type="file" id="file" name="file" accept=".md,.txt" class="file-input file-input-bordered w-full" required>
+                </label>
+
+                <label class="form-control">
+                    <div class="label px-0">
+                        <span class="label-text">Scope</span>
+                        <span class="label-text-alt">可选</span>
+                    </div>
+                    <input type="text" name="scope" placeholder="reports/2026" class="input input-bordered w-full">
+                </label>
+
+                <label class="toggle-row">
+                    <span>
+                        <strong>覆盖更新</strong>
+                        <small>同名文档先删再重建</small>
+                    </span>
+                    <input type="checkbox" name="force_update" value="true" class="checkbox checkbox-warning checkbox-sm">
+                </label>
+            </fieldset>
+
+            <div class="action-row justify-between">
+                <p class="text-sm text-base-content/65">后端会做切分、摘要、关键词和 metadata 注入。</p>
+                <button type="submit" class="btn btn-primary">开始入库</button>
+            </div>
+        </form>
     </div>
 
-    <div class="lg:col-span-5 space-y-4">
+    <div class="space-y-4">
         <div id="upload-result">
             {% include "partials/upload_result.html" %}
         </div>
-        <div class="card bg-base-100 shadow-lg ring-1 ring-base-200">
-            <div class="card-body space-y-2">
-                <h3 class="card-title text-base">说明</h3>
-                <ul class="list-disc list-inside text-sm text-base-content/70 space-y-1">
-                    <li>上传内容需为 UTF-8 Markdown；其它格式请先离线转换。</li>
-                    <li>入库幂等：同一 doc_hash 会被跳过，避免重复切片。</li>
-                    <li>长时间请求会展示加载遮罩，可安全等待，无需刷新。</li>
-                </ul>
+
+        <div class="surface-card">
+            <div class="section-heading">
+                <div>
+                    <span class="soft-label">最短路径</span>
+                    <h2 class="section-title">建议顺序</h2>
+                </div>
             </div>
+            <ol class="steps steps-vertical text-sm">
+                <li class="step step-primary">上传文档并记录 `doc_hash`</li>
+                <li class="step step-primary">必要时去检索页验证命中</li>
+                <li class="step step-primary">在 Grounding 页按 `doc_hash` 做证据裁决</li>
+            </ol>
         </div>
     </div>
 </section>

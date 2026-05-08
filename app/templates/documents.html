@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+
+{% block content %}
+<section class="space-y-6">
+    <div class="surface-card">
+        <div class="grid gap-4 lg:grid-cols-[1fr_auto] lg:items-end">
+            <div class="space-y-3">
+                <span class="soft-label">文档管理</span>
+                <h1 class="section-title">按 `filename + scope` 查看和删除已入库文档。</h1>
+                <p class="text-sm text-base-content/70">删除会清缓存。Grounding 定位文档时优先用 `doc_hash`，没有时再用这里看到的 `filename + scope`。</p>
+            </div>
+            <div class="flex flex-col gap-3 sm:flex-row sm:items-center">
+                <label class="input input-bordered flex items-center gap-2">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 opacity-60" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-4.35-4.35m1.85-5.15a7 7 0 11-14 0 7 7 0 0114 0z" />
+                    </svg>
+                    <input
+                        type="text"
+                        placeholder="搜索 filename / scope / date"
+                        data-document-filter
+                        oninput="window.filterDocumentRows(this.value)"
+                        class="grow"
+                    >
+                </label>
+                <button
+                    class="btn btn-outline"
+                    hx-get="/ui/documents"
+                    hx-target="#document-list-container"
+                    hx-swap="innerHTML transition:true"
+                    data-busy-text="正在刷新文档列表..."
+                >
+                    刷新列表
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <div id="document-list-container">
+        {% include "partials/document_list.html" %}
+    </div>
+</section>
+{% endblock %}

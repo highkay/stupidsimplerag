@@ -194,14 +194,16 @@ curl -X POST http://localhost:8000/chat \
 
 | 页面/接口 | 说明 |
 | --- | --- |
-| `/` | Dashboard（Qdrant 状态、缓存状态、配置快照） |
-| `/ui/upload` | 单文件上传页面 |
-| `/ui/upload/batch` | 批量上传页面 |
-| `/ui/chat` | 查询页面 |
+| `/` | Dashboard（当前集合、缓存、能力入口） |
+| `/ui/upload` | 单文件上传页面；支持 `.md/.txt`，结果里显示 `doc_hash` |
+| `/ui/upload/batch` | 批量上传页面；支持 `.md/.txt`，结果里显示每个文件的 `doc_hash` |
+| `/ui/chat` | 查询页面；支持标准检索与 `/chat/lod` 两阶段模式切换 |
+| `/ui/grounding` | 单文档 grounding 页面；表单提交到 `/grounding/query` |
+| `/ui/documents/manage` | 文档管理页面 |
 | `/ui/documents` | 文档列表 partial |
 | `/ui/documents/{filename}` | 删除文档（HTMX） |
 
-说明：UI 表单默认 `accept=.md`，但后端 API 实际支持 `.md` 和 `.txt`。
+说明：当前 UI 上传表单已与后端保持一致，直接支持 `.md` 和 `.txt`。
 
 ## 关键实现细节（与代码一致）
 

@@ -36,7 +36,7 @@
 
 - `app/main.py`
   - API 路由：`/health`、`/ingest`、`/ingest/batch`、`/ingest/text`、`/grounding/query`、`/chat`、`/chat/lod`、`/documents`。
-  - UI 路由：`/`、`/ui/upload`、`/ui/upload/batch`、`/ui/chat`、`/ui/documents`。
+  - UI 路由：`/`、`/ui/upload`、`/ui/upload/batch`、`/ui/chat`、`/ui/grounding`、`/ui/documents/manage`、`/ui/documents`。
   - 关键行为：缓存键构造、重试策略、成功入库后缓存失效、`scope` 归一化、按 `(filename, scope)` 删除重建、同文档 in-flight ingest 合并/串行化、HTMX 入口。
 
 - `app/ingest.py`

@@ -1,0 +1,118 @@
+{% extends "base.html" %}
+
+{% block content %}
+<section class="grid gap-6 xl:grid-cols-[0.9fr_1.1fr]">
+    <div class="surface-card">
+        <div class="section-heading">
+            <div>
+                <span class="soft-label">单文档 Grounding</span>
+                <h1 class="section-title">用 `doc_hash` 或 `filename + scope`，给一组候选项做证据分层。</h1>
+            </div>
+            <span class="badge badge-secondary badge-outline">Evidence</span>
+        </div>
+
+        <form
+            method="post"
+            action="/ui/grounding/query"
+            hx-post="/ui/grounding/query"
+            hx-target="#grounding-result"
+            hx-swap="innerHTML transition:true"
+            hx-indicator="#global-indicator"
+            hx-sync="closest form:queue"
+            hx-disabled-elt="fieldset, button"
+            data-busy-text="正在执行 grounding..."
+            class="space-y-5"
+        >
+            <fieldset class="space-y-4">
+                <div class="grid gap-3 md:grid-cols-2">
+                    <label class="form-control md:col-span-2">
+                        <div class="label px-0">
+                            <span class="label-text font-medium">doc_hash</span>
+                            <span class="label-text-alt">优先使用</span>
+                        </div>
+                        <input
+                            type="text"
+                            name="doc_hash"
+                            value="{{ form_data.doc_hash }}"
+                            placeholder="例如：93655b54..."
+                            class="input input-bordered w-full"
+                        >
+                    </label>
+                    <label class="form-control">
+                        <div class="label px-0"><span class="label-text">filename</span></div>
+                        <input
+                            type="text"
+                            name="filename"
+                            value="{{ form_data.filename }}"
+                            placeholder="缺少 doc_hash 时再用"
+                            class="input input-bordered w-full"
+                        >
+                    </label>
+                    <label class="form-control">
+                        <div class="label px-0"><span class="label-text">scope</span></div>
+                        <input
+                            type="text"
+                            name="scope"
+                            value="{{ form_data.scope }}"
+                            placeholder="reports/2026"
+                            class="input input-bordered w-full"
+                        >
+                    </label>
+                </div>
+
+                <label class="form-control">
+                    <div class="label px-0">
+                        <span class="label-text font-medium">候选项</span>
+                        <span class="label-text-alt">每行一个</span>
+                    </div>
+                    <textarea
+                        name="candidates_text"
+                        class="textarea textarea-bordered min-h-56 font-mono text-sm"
+                        placeholder="立讯精密&#10;仕佳光子|仕佳, 688313&#10;002475.SZ|立讯精密|立讯|stock"
+                    >{{ form_data.candidates_text }}</textarea>
+                </label>
+
+                <div class="grid gap-3 md:grid-cols-[1fr_auto] md:items-end">
+                    <label class="form-control">
+                        <div class="label px-0">
+                            <span class="label-text">最大 excerpt 数</span>
+                        </div>
+                        <input
+                            type="number"
+                            min="1"
+                            max="10"
+                            name="max_excerpts"
+                            value="{{ form_data.max_excerpts }}"
+                            class="input input-bordered w-full"
+                        >
+                    </label>
+                    <label class="toggle-row h-full">
+                        <span>
+                            <strong>跳过 rerank</strong>
+                            <small>仅保留确定性排序</small>
+                        </span>
+                        <input
+                            type="checkbox"
+                            name="skip_rerank"
+                            value="true"
+                            class="checkbox checkbox-sm"
+                            {% if form_data.skip_rerank %}checked{% endif %}
+                        >
+                    </label>
+                </div>
+            </fieldset>
+
+            <div class="action-row justify-between">
+                <p class="text-sm text-base-content/65">支持三种简写：`name`、`name|aliases`、`id|name|aliases|type`。</p>
+                <button type="submit" class="btn btn-primary">执行 Grounding</button>
+            </div>
+        </form>
+    </div>
+
+    <div class="space-y-4">
+        <div id="grounding-result">
+            {% include "partials/grounding_result.html" %}
+        </div>
+    </div>
+</section>
+{% endblock %}

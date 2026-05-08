@@ -6,48 +6,71 @@
     </div>
 </div>
 {% elif results %}
-<div class="card bg-base-100 shadow-xl ring-1 ring-base-200">
-    <div class="card-body space-y-3">
-        <div class="flex items-center justify-between">
-            <h3 class="card-title text-lg">批量入库完成</h3>
-            <div class="badge badge-secondary badge-outline">{{ results | length }} files</div>
+{% set ok_count = results | selectattr("status", "equalto", "ok") | list | length %}
+{% set skipped_count = results | selectattr("status", "equalto", "skipped") | list | length %}
+{% set error_count = results | length - ok_count - skipped_count %}
+<div class="surface-card">
+    <div class="section-heading">
+        <div>
+            <span class="soft-label">批量结果</span>
+            <h2 class="section-title">共 {{ results | length }} 个文件。</h2>
         </div>
-        <div class="overflow-x-auto">
-            <table class="table table-sm">
-                <thead>
-                    <tr>
-                        <th>文件名</th>
-                        <th>Scope</th>
-                        <th>切片</th>
-                        <th>状态</th>
-                        <th>错误</th>
-                    </tr>
-                </thead>
-                <tbody>
-                {% for item in results %}
-                    <tr>
-                        <td class="font-semibold">{{ item.filename }}</td>
-                        <td>{{ item.scope or '∅' }}</td>
-                        <td>{{ item.chunks }}</td>
-                        <td>
-                            {% if item.status == "ok" %}
-                                <span class="badge badge-success badge-outline">ok</span>
-                            {% elif item.status == "skipped" %}
-                                <span class="badge badge-ghost">skipped</span>
-                            {% else %}
-                                <span class="badge badge-error badge-outline">{{ item.status }}</span>
-                            {% endif %}
-                        </td>
-                        <td class="text-xs text-base-content/60">{{ item.error or "-" }}</td>
-                    </tr>
-                {% endfor %}
-                </tbody>
-            </table>
+        <span class="badge badge-secondary badge-outline">batch</span>
+    </div>
+
+    <div class="grid gap-3 md:grid-cols-3 mb-4">
+        <div class="result-stat">
+            <span class="result-stat-label">ok</span>
+            <span class="result-stat-value">{{ ok_count }}</span>
         </div>
+        <div class="result-stat">
+            <span class="result-stat-label">skipped</span>
+            <span class="result-stat-value">{{ skipped_count }}</span>
+        </div>
+        <div class="result-stat">
+            <span class="result-stat-label">error</span>
+            <span class="result-stat-value">{{ error_count }}</span>
+        </div>
+    </div>
+
+    <div class="overflow-x-auto">
+        <table class="table table-sm">
+            <thead>
+                <tr>
+                    <th>文件</th>
+                    <th>Scope</th>
+                    <th>切片</th>
+                    <th>状态</th>
+                    <th>doc_hash</th>
+                    <th>错误</th>
+                </tr>
+            </thead>
+            <tbody>
+            {% for item in results %}
+                <tr>
+                    <td class="font-semibold">{{ item.filename }}</td>
+                    <td>{{ item.scope or "∅" }}</td>
+                    <td>{{ item.chunks }}</td>
+                    <td>
+                        {% if item.status == "ok" %}
+                            <span class="badge badge-success badge-outline">ok</span>
+                        {% elif item.status == "skipped" %}
+                            <span class="badge badge-warning badge-outline">skipped</span>
+                        {% else %}
+                            <span class="badge badge-error badge-outline">{{ item.status }}</span>
+                        {% endif %}
+                    </td>
+                    <td class="font-mono text-[11px] break-all">{{ item.doc_hash or "-" }}</td>
+                    <td class="text-xs text-base-content/60">{{ item.error or "-" }}</td>
+                </tr>
+            {% endfor %}
+            </tbody>
+        </table>
     </div>
 </div>
 {% else %}
-<div class="card bg-base-100 shadow-lg ring-1 ring-base-200">
-    <div class="card-body text-sm text-base-content/70">暂无结果</div>
+<div class="empty-panel">
+    <h3>等待批量结果</h3>
+    <p>这里会展示每个文件的状态、切片数和 `doc_hash`。</p>
 </div>
 {% endif %}

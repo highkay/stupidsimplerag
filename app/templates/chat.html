@@ -1,107 +1,131 @@
 {% extends "base.html" %}
 
 {% block content %}
-<section class="grid lg:grid-cols-12 gap-6">
-    <div class="lg:col-span-5 space-y-4">
-        <div class="card bg-base-100 shadow-xl ring-1 ring-base-200">
-            <div class="card-body space-y-4">
-                <div class="flex items-center justify-between">
-                    <div>
-                        <h2 class="card-title text-lg">查询 / 混合检索</h2>
-                        <p class="text-sm text-base-content/70">低成本 Dense + Sparse + Rerank，带时间衰减</p>
-                    </div>
-                    <div class="badge badge-primary badge-outline">Chat</div>
-                </div>
-                <form
-                    method="post"
-                    action="/ui/chat/query"
-                    hx-post="/ui/chat/query"
-                    hx-target="#chat-result"
-                    hx-swap="innerHTML transition:true"
-                    hx-indicator="#global-indicator"
-                    hx-sync="closest form:queue"
-                    hx-disabled-elt="fieldset, button"
-                    hx-on::afterRequest="document.getElementById('chat-result')?.scrollIntoView({behavior:'smooth'})"
-                    data-busy-text="正在检索与重排..."
-                    class="space-y-4"
-                >
-                    <fieldset class="space-y-4">
-                        <label class="form-control">
-                            <div class="label">
-                                <span class="label-text">问题</span>
-                                <span class="label-text-alt text-primary">必填</span>
-                            </div>
-                            <input type="text" id="query" name="query" placeholder="例如：英伟达最新财报表现" class="input input-bordered w-full" required>
-                        </label>
+<section class="grid gap-6 xl:grid-cols-[0.95fr_1.15fr]">
+    <div class="surface-card">
+        <div class="section-heading">
+            <div>
+                <span class="soft-label">检索面板</span>
+                <h1 class="section-title">标准检索与 LOD 两阶段共用一张表单。</h1>
+            </div>
+            <span class="badge badge-primary badge-outline">Query</span>
+        </div>
 
-                        <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
-                            <label class="form-control">
-                                <div class="label"><span class="label-text">起始日期</span></div>
-                                <input type="date" name="start_date" class="input input-bordered w-full">
+        <form
+            method="post"
+            action="/ui/chat/query"
+            hx-post="/ui/chat/query"
+            hx-target="#chat-result"
+            hx-swap="innerHTML transition:true"
+            hx-indicator="#global-indicator"
+            hx-sync="closest form:queue"
+            hx-disabled-elt="fieldset, button"
+            hx-on::afterRequest="document.getElementById('chat-result')?.scrollIntoView({behavior:'smooth', block:'start'})"
+            data-busy-text="正在检索..."
+            class="space-y-5"
+        >
+            <fieldset class="space-y-5">
+                <div class="space-y-3">
+                    <div class="label px-0 py-0">
+                        <span class="label-text font-medium">模式</span>
+                        <span class="label-text-alt">标准检索默认更快</span>
+                    </div>
+                    <div class="mode-switch">
+                        <label class="mode-option">
+                            <input type="radio" name="query_mode" value="chat" checked>
+                            <span>
+                                <strong>标准检索</strong>
+                                <small>Hybrid + 可选 rerank / generation</small>
+                            </span>
+                        </label>
+                        <label class="mode-option">
+                            <input type="radio" name="query_mode" value="lod">
+                            <span>
+                                <strong>LOD 两阶段</strong>
+                                <small>先筛文档，再聚焦生成</small>
+                            </span>
+                        </label>
+                    </div>
+                </div>
+
+                <label class="form-control">
+                    <div class="label px-0">
+                        <span class="label-text font-medium">问题</span>
+                        <span class="label-text-alt text-primary">必填</span>
+                    </div>
+                    <input
+                        type="text"
+                        id="query"
+                        name="query"
+                        placeholder="例如：英伟达最新财报表现，或 2026 年光模块景气度变化"
+                        class="input input-bordered w-full"
+                        required
+                    >
+                </label>
+
+                <div class="grid gap-3 md:grid-cols-2">
+                    <label class="form-control">
+                        <div class="label px-0"><span class="label-text">起始日期</span></div>
+                        <input type="date" name="start_date" class="input input-bordered w-full">
+                    </label>
+                    <label class="form-control">
+                        <div class="label px-0"><span class="label-text">结束日期</span></div>
+                        <input type="date" name="end_date" class="input input-bordered w-full">
+                    </label>
+                </div>
+
+                <details class="collapse collapse-arrow bg-base-200/80 border border-base-300/70">
+                    <summary class="collapse-title text-sm font-semibold">过滤与开关</summary>
+                    <div class="collapse-content space-y-4">
+                        <div class="grid gap-3 md:grid-cols-2">
+                            <label class="flex items-center gap-2">
+                                <input type="checkbox" class="checkbox checkbox-sm" name="skip_rerank">
+                                <span class="text-sm">跳过 rerank</span>
                             </label>
-                            <label class="form-control">
-                                <div class="label"><span class="label-text">结束日期</span></div>
-                                <input type="date" name="end_date" class="input input-bordered w-full">
+                            <label class="flex items-center gap-2">
+                                <input type="checkbox" class="checkbox checkbox-sm" name="skip_generation">
+                                <span class="text-sm">仅返回切片</span>
                             </label>
                         </div>
 
-                        <details class="collapse collapse-arrow bg-base-200/60">
-                            <summary class="collapse-title text-sm font-semibold">高级过滤（文件名 / 关键词）</summary>
-                            <div class="collapse-content space-y-3">
-                                <label class="flex items-center gap-2">
-                                    <input type="checkbox" class="checkbox checkbox-sm" name="skip_rerank">
-                                    <span class="text-sm">跳过 Rerank（直接返回相似度排序，最低成本）</span>
-                                </label>
-                                <label class="flex items-center gap-2">
-                                    <input type="checkbox" class="checkbox checkbox-sm" name="skip_generation">
-                                    <span class="text-sm">跳过回答生成（仅返回切片，方便前端自行组装）</span>
-                                </label>
+                        <div class="grid gap-3">
+                            <label class="form-control">
+                                <div class="label px-0"><span class="label-text">Scope</span></div>
+                                <input type="text" name="scope" placeholder="reports/2026" class="input input-bordered w-full">
+                            </label>
+                            <div class="grid gap-3 md:grid-cols-2">
                                 <label class="form-control">
-                                    <div class="label"><span class="label-text">Scope（精确匹配）</span></div>
-                                    <input type="text" name="scope" placeholder="reports/2026" class="input input-bordered w-full">
-                                </label>
-                                <label class="form-control">
-                                    <div class="label"><span class="label-text">文件名（精确匹配）</span></div>
+                                    <div class="label px-0"><span class="label-text">文件名精确匹配</span></div>
                                     <input type="text" name="filename" placeholder="20250228_NVIDIA_Report.md" class="input input-bordered w-full">
                                 </label>
                                 <label class="form-control">
-                                    <div class="label"><span class="label-text">文件名包含</span></div>
+                                    <div class="label px-0"><span class="label-text">文件名包含</span></div>
                                     <input type="text" name="filename_contains" placeholder="NVIDIA" class="input input-bordered w-full">
                                 </label>
+                            </div>
+                            <div class="grid gap-3 md:grid-cols-2">
                                 <label class="form-control">
-                                    <div class="label"><span class="label-text">包含任意关键词（逗号分隔）</span></div>
+                                    <div class="label px-0"><span class="label-text">任意关键词</span></div>
                                     <input type="text" name="keywords_any" placeholder="NVDA, 英伟达, GPU" class="input input-bordered w-full">
                                 </label>
                                 <label class="form-control">
-                                    <div class="label"><span class="label-text">同时包含关键词</span></div>
-                                    <input type="text" name="keywords_all" placeholder="数据中心, 盈亏" class="input input-bordered w-full">
+                                    <div class="label px-0"><span class="label-text">全部关键词</span></div>
+                                    <input type="text" name="keywords_all" placeholder="数据中心, 盈利" class="input input-bordered w-full">
                                 </label>
                             </div>
-                        </details>
-                    </fieldset>
-                    <div class="flex items-center justify-between gap-4">
-                        <div class="text-xs text-base-content/60">
-                            支持 htmx 异步请求，超时自动覆盖到长轮询加载态。
                         </div>
-                        <button type="submit" class="btn btn-primary">执行检索</button>
                     </div>
-                </form>
-            </div>
-        </div>
+                </details>
+            </fieldset>
 
-        <div class="card bg-base-100 shadow-lg ring-1 ring-base-200">
-            <div class="card-body space-y-2">
-                <h3 class="card-title text-base">检索提示</h3>
-                <ul class="list-disc list-inside text-sm text-base-content/70 space-y-1">
-                    <li>时间过滤映射到 Qdrant metadata filter，可与 rerank 叠加。</li>
-                    <li>关键词过滤在应用层完成，减少 rerank 负担。</li>
-                    <li>缓存命中会直接回填结果，避免重复调用模型。</li>
-                </ul>
+            <div class="action-row justify-between">
+                <p class="text-sm text-base-content/65">标准模式适合直接问答；LOD 更适合宽问题先缩小文档范围。</p>
+                <button type="submit" class="btn btn-primary">执行检索</button>
             </div>
-        </div>
+        </form>
     </div>
 
-    <div class="lg:col-span-7">
+    <div class="space-y-4">
         <div id="chat-result">
             {% include "partials/chat_result.html" %}
         </div>

@@ -1,0 +1,105 @@
+{% if error %}
+<div class="alert alert-error shadow-lg">
+    <div>
+        <span class="text-lg font-semibold">Grounding 失败</span>
+        <p class="text-sm whitespace-pre-wrap">{{ error }}</p>
+    </div>
+</div>
+{% elif result %}
+<div class="surface-card">
+    <div class="section-heading">
+        <div>
+            <span class="soft-label">目标文档</span>
+            <h2 class="section-title">{{ result.document.filename }}</h2>
+        </div>
+        <span class="badge badge-outline">{{ result.candidate_results | length }} 个候选项</span>
+    </div>
+
+    <div class="grid gap-3 md:grid-cols-2">
+        <div class="result-stat">
+            <span class="result-stat-label">doc_hash</span>
+            <span class="result-stat-mono">{{ result.document.doc_hash or "-" }}</span>
+        </div>
+        <div class="result-stat">
+            <span class="result-stat-label">Scope</span>
+            <span class="result-stat-value">{{ result.document.scope or "∅" }}</span>
+        </div>
+        <div class="result-stat">
+            <span class="result-stat-label">日期</span>
+            <span class="result-stat-value">{{ result.document.date or "-" }}</span>
+        </div>
+        <div class="result-stat">
+            <span class="result-stat-label">Chunk 数</span>
+            <span class="result-stat-value">{{ result.document.chunk_count }}</span>
+        </div>
+    </div>
+
+    {% if result.document.summary %}
+    <div class="callout-panel mt-4">
+        <span class="soft-label">摘要</span>
+        <p class="text-sm leading-7 text-base-content/80 mt-2">{{ result.document.summary }}</p>
+    </div>
+    {% endif %}
+</div>
+
+<div class="space-y-4">
+    {% for item in result.candidate_results %}
+    {% set tier = item.relevance_tier %}
+    <article class="surface-card">
+        <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+            <div class="space-y-2">
+                <div class="flex flex-wrap items-center gap-2">
+                    <h3 class="text-lg font-semibold">{{ item.name }}</h3>
+                    {% if item.identifier %}
+                    <span class="badge badge-ghost">{{ item.identifier }}</span>
+                    {% endif %}
+                    {% if tier == "body_grounded" %}
+                    <span class="badge badge-success badge-outline">body_grounded</span>
+                    {% elif tier == "relation_grounded" %}
+                    <span class="badge badge-info badge-outline">relation_grounded</span>
+                    {% elif tier == "list_only" %}
+                    <span class="badge badge-warning badge-outline">list_only</span>
+                    {% else %}
+                    <span class="badge badge-ghost">not_found</span>
+                    {% endif %}
+                </div>
+                <p class="text-sm text-base-content/75 leading-7">{{ item.source_reason }}</p>
+            </div>
+
+            <div class="flex flex-wrap gap-2 lg:justify-end">
+                <span class="badge badge-outline">body {{ item.body_hit_count }}</span>
+                <span class="badge badge-outline">qa {{ item.qa_hit_count }}</span>
+                <span class="badge badge-outline">list {{ item.list_hit_count }}</span>
+            </div>
+        </div>
+
+        <div class="callout-panel mt-4">
+            <span class="soft-label">candidate_brief</span>
+            <p class="text-sm leading-7 mt-2">{{ item.candidate_brief }}</p>
+        </div>
+
+        {% if item.excerpts %}
+        <div class="space-y-3 mt-4">
+            {% for excerpt in item.excerpts %}
+            <div class="source-card">
+                <div class="flex flex-wrap items-center gap-2 mb-2">
+                    <span class="badge badge-ghost">{{ excerpt.section_type }}</span>
+                    <span class="badge badge-outline">score {{ "%.4f"|format(excerpt.score or 0) }}</span>
+                    {% if excerpt.is_alias_hit %}
+                    <span class="badge badge-info badge-outline">alias hit</span>
+                    {% endif %}
+                </div>
+                <p class="text-sm leading-7 text-base-content/80">{{ excerpt.text }}</p>
+            </div>
+            {% endfor %}
+        </div>
+        {% endif %}
+    </article>
+    {% endfor %}
+</div>
+{% else %}
+<div class="empty-panel">
+    <h3>等待 Grounding</h3>
+    <p>输入文档定位信息和候选项后，这里会返回分层结果与 excerpt。</p>
+</div>
+{% endif %}
