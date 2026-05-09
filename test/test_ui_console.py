@@ -32,6 +32,17 @@ def test_dashboard_mentions_grounding_and_lod(client):
     assert "/ui/grounding" in body
 
 
+def test_dashboard_uses_local_vendor_assets(client):
+    response = client.get("/")
+
+    assert response.status_code == 200
+    body = response.text
+    assert "/static/vendor/tailwindcdn-3.4.17.js" in body
+    assert "/static/vendor/daisyui-4.12.10.full.min.css" in body
+    assert "https://cdn.tailwindcss.com" not in body
+    assert "fonts.googleapis.com" not in body
+
+
 def test_upload_ui_accepts_markdown_and_txt(client):
     response = client.get("/ui/upload")
 
@@ -149,7 +160,15 @@ def test_grounding_ui_parses_candidates_and_renders_response(client):
     assert request_body.candidates[1].candidate_type == "stock"
 
 
-def test_documents_page_renders_filter_and_rows(client):
+def test_documents_page_lazy_loads_partial(client):
+    response = client.get("/ui/documents/manage")
+    assert response.status_code == 200
+    body = response.text
+    assert "搜索 filename / scope / date" in body
+    assert 'hx-get="/ui/documents?limit=100"' in body
+
+
+def test_documents_partial_respects_search_and_limit(client):
     docs = [
         {
             "filename": "sample.md",
@@ -158,10 +177,38 @@ def test_documents_page_renders_filter_and_rows(client):
             "chunks": 3,
         }
     ]
-    with patch("app.main.list_all_documents", new=AsyncMock(return_value=docs)):
-        response = client.get("/ui/documents/manage")
+    with patch("app.main.list_all_documents", new=AsyncMock(return_value=docs)) as mock_list:
+        response = client.get("/ui/documents", params={"search": "sample", "limit": 50})
 
     assert response.status_code == 200
     body = response.text
-    assert "搜索 filename / scope / date" in body
     assert "sample.md" in body
+    assert "当前过滤词：sample" in body
+    assert "limit 50" in body
+    mock_list.assert_awaited_once_with(limit=50, search="sample")
+
+
+def test_documents_delete_preserves_filter_context(client):
+    docs = [
+        {
+            "filename": "sample.md",
+            "scope": "reports/2026",
+            "date": "2026-05-08",
+            "chunks": 2,
+        }
+    ]
+    with patch(
+        "app.main.delete_nodes_by_filename",
+        new=AsyncMock(return_value=True),
+    ) as mock_delete, patch(
+        "app.main.list_all_documents",
+        new=AsyncMock(return_value=docs),
+    ) as mock_list:
+        response = client.delete(
+            "/ui/documents/sample.md",
+            params={"scope": "reports/2026", "search": "sample", "limit": 50},
+        )
+
+    assert response.status_code == 200
+    mock_delete.assert_awaited_once_with("sample.md", scope="reports/2026")
+    mock_list.assert_awaited_once_with(limit=50, search="sample")

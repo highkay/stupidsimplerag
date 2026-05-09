@@ -1604,7 +1604,7 @@ async def delete_nodes_by_filename(filename: str, scope: Optional[str] = None) -
         return False
 
 
-async def list_all_documents(limit: int = 1000) -> List[dict]:
+async def list_all_documents(limit: int = 1000, search: Optional[str] = None) -> List[dict]:
     """
     List unique documents in the collection by aggregating filename info.
     Returns a list of dicts: [{'filename': str, 'date': str, 'chunks': int}]
@@ -1618,6 +1618,7 @@ async def list_all_documents(limit: int = 1000) -> List[dict]:
     offset = None
     points_scanned = 0
     MAX_POINTS_TO_SCAN = 50000  # Safety cap to prevent infinite or extremely long scans
+    search_text = (search or "").strip().lower()
     
     while points_scanned < MAX_POINTS_TO_SCAN:
         try:
@@ -1639,13 +1640,20 @@ async def list_all_documents(limit: int = 1000) -> List[dict]:
                     continue
 
                 scope = payload.get("scope") or None
+                date = payload.get("date")
+                if search_text:
+                    haystack = " ".join(
+                        part for part in [fname, scope or "", date or ""] if part
+                    ).lower()
+                    if search_text not in haystack:
+                        continue
                 doc_key = (fname, scope)
                 if doc_key not in docs:
                     if len(docs) >= limit:
                         continue  # Keep counting chunks for existing docs but don't add new ones
                     docs[doc_key] = {
                         "filename": fname,
-                        "date": payload.get("date"),
+                        "date": date,
                         "chunks": 0,
                         "scope": scope,
                     }

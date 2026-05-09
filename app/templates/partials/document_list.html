@@ -2,10 +2,16 @@
     <div class="section-heading">
         <div>
             <span class="soft-label">当前文档</span>
-            <h2 class="section-title">共 <span data-document-count-label>{{ documents | length }} 条</span>。</h2>
+            <h2 class="section-title">当前返回 {{ documents | length }} 条。</h2>
         </div>
-        <span class="badge badge-outline">filename + scope</span>
+        <span class="badge badge-outline">limit {{ document_limit }}</span>
     </div>
+
+    {% if document_search %}
+    <div class="alert alert-info mb-4">
+        <span>当前过滤词：{{ document_search }}</span>
+    </div>
+    {% endif %}
 
     <div class="overflow-x-auto">
         <table class="table table-sm">
@@ -28,11 +34,7 @@
                     </tr>
                     {% endif %}
                     {% for doc in documents %}
-                    <tr
-                        id="doc-row-{{ loop.index }}"
-                        data-document-row
-                        data-search="{{ (doc.filename ~ ' ' ~ (doc.scope or '') ~ ' ' ~ (doc.date or '')) | lower }}"
-                    >
+                    <tr id="doc-row-{{ loop.index }}">
                         <td class="font-medium">{{ doc.filename }}</td>
                         <td>
                             <span class="badge badge-outline badge-sm">{{ doc.scope or "∅" }}</span>
@@ -42,7 +44,7 @@
                         <td class="text-right">
                             <button
                                 class="btn btn-error btn-xs"
-                                hx-delete="/ui/documents/{{ doc.filename }}{% if doc.scope %}?scope={{ doc.scope | urlencode }}{% endif %}"
+                                hx-delete="/ui/documents/{{ doc.filename }}?limit={{ document_limit }}{% if document_search %}&search={{ document_search | urlencode }}{% endif %}{% if doc.scope %}&scope={{ doc.scope | urlencode }}{% endif %}"
                                 hx-target="#document-list-container"
                                 hx-swap="innerHTML transition:true"
                                 hx-confirm="确认删除 {{ doc.filename }}{% if doc.scope %}（scope={{ doc.scope }}）{% endif %} 吗？"
@@ -55,7 +57,7 @@
                     {% endfor %}
                 {% else %}
                     <tr>
-                        <td colspan="5" class="text-center py-6 text-base-content/50">暂无文档。</td>
+                        <td colspan="5" class="text-center py-6 text-base-content/50">没有匹配结果。</td>
                     </tr>
                 {% endif %}
             </tbody>

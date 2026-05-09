@@ -4,14 +4,10 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>stupidsimplerag 控制台</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <link href="https://cdn.jsdelivr.net/npm/daisyui@4.12.10/dist/full.min.css" rel="stylesheet">
-    <script src="https://unpkg.com/htmx.org@2.0.3"></script>
-    <script src="https://unpkg.com/htmx.org/dist/ext/loading-states.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.7/dist/cdn.min.js" defer></script>
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&family=Noto+Serif+SC:wght@500;700&display=swap" rel="stylesheet">
+    <script src="{{ url_for('static', path='vendor/tailwindcdn-3.4.17.js') }}"></script>
+    <link href="{{ url_for('static', path='vendor/daisyui-4.12.10.full.min.css') }}" rel="stylesheet">
+    <script src="{{ url_for('static', path='vendor/htmx-2.0.10.min.js') }}"></script>
+    <script src="{{ url_for('static', path='vendor/htmx-loading-states-2.0.10.js') }}"></script>
     <link rel="icon" type="image/svg+xml" href="{{ url_for('static', path='favicon.svg') }}">
     <link rel="stylesheet" href="{{ url_for('static', path='styles.css') }}">
     <script>
@@ -20,7 +16,7 @@
       });
     </script>
 </head>
-<body class="shell-body" x-data="appShell()" x-init="init()">
+<body class="shell-body">
     <div class="shell-backdrop" aria-hidden="true">
         <div class="shell-glow shell-glow-a"></div>
         <div class="shell-glow shell-glow-b"></div>
@@ -83,69 +79,58 @@
     >
         <div class="loading-panel">
             <span class="loading loading-spinner loading-lg text-primary"></span>
-            <p class="loading-title" x-text="busyText"></p>
+            <p id="busy-text" class="loading-title">处理中...</p>
             <p class="loading-copy">长请求保持页面停留即可，不需要刷新。</p>
         </div>
     </div>
 
-    <div class="toast toast-end z-40" x-show="toast" x-transition.opacity.duration.200ms>
+    <div id="shell-toast" class="toast toast-end z-40 hidden">
         <div class="alert alert-info shadow-xl">
             <div>
-                <span class="text-base font-semibold" x-text="toast?.title"></span>
-                <p class="text-sm" x-text="toast?.body"></p>
+                <span id="shell-toast-title" class="text-base font-semibold"></span>
+                <p id="shell-toast-body" class="text-sm"></p>
             </div>
         </div>
     </div>
 
     <script>
-      function appShell() {
-        return {
-          busyText: "处理中...",
-          toast: null,
-          init() {
-            document.body.addEventListener("htmx:beforeRequest", (event) => {
-              const text = event.detail?.elt?.dataset?.busyText;
-              this.busyText = text || "处理中...";
-              document.getElementById("global-indicator")?.classList.remove("hidden");
-            });
-            document.body.addEventListener("htmx:afterRequest", () => {
-              document.getElementById("global-indicator")?.classList.add("hidden");
-            });
-            document.body.addEventListener("htmx:responseError", (event) => {
-              const msg = event.detail?.xhr?.responseText || "请稍后再试";
-              this.showToast("请求失败", msg);
-            });
-            document.body.addEventListener("htmx:afterSwap", () => {
-              const input = document.querySelector("[data-document-filter]");
-              if (input) {
-                window.filterDocumentRows(input.value);
-              }
-            });
-          },
-          showToast(title, body) {
-            this.toast = { title, body };
-            setTimeout(() => (this.toast = null), 3600);
-          },
-        };
-      }
+      document.addEventListener("DOMContentLoaded", () => {
+        const indicator = document.getElementById("global-indicator");
+        const busyText = document.getElementById("busy-text");
+        const toast = document.getElementById("shell-toast");
+        const toastTitle = document.getElementById("shell-toast-title");
+        const toastBody = document.getElementById("shell-toast-body");
+        let toastTimer = null;
 
-      window.filterDocumentRows = function(value) {
-        const query = (value || "").trim().toLowerCase();
-        const rows = Array.from(document.querySelectorAll("[data-document-row]"));
-        let visible = 0;
-        rows.forEach((row) => {
-          const haystack = row.dataset.search || "";
-          const matched = !query || haystack.includes(query);
-          row.classList.toggle("hidden", !matched);
-          if (matched) {
-            visible += 1;
+        const showToast = (title, body) => {
+          if (!toast || !toastTitle || !toastBody) return;
+          toastTitle.textContent = title;
+          toastBody.textContent = body;
+          toast.classList.remove("hidden");
+          if (toastTimer) {
+            clearTimeout(toastTimer);
           }
+          toastTimer = setTimeout(() => {
+            toast.classList.add("hidden");
+          }, 3600);
+        };
+
+        document.body.addEventListener("htmx:beforeRequest", (event) => {
+          if (busyText) {
+            busyText.textContent = event.detail?.elt?.dataset?.busyText || "处理中...";
+          }
+          indicator?.classList.remove("hidden");
         });
-        const labels = document.querySelectorAll("[data-document-count-label]");
-        labels.forEach((label) => {
-          label.textContent = `${visible} 条`;
+
+        document.body.addEventListener("htmx:afterRequest", () => {
+          indicator?.classList.add("hidden");
         });
-      };
+
+        document.body.addEventListener("htmx:responseError", (event) => {
+          const msg = event.detail?.xhr?.responseText || "请稍后再试";
+          showToast("请求失败", msg);
+        });
+      });
     </script>
 </body>
 </html>

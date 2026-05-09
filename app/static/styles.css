@@ -21,7 +21,7 @@ html {
 body {
     margin: 0;
     color: var(--shell-ink);
-    font-family: "IBM Plex Sans", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    font-family: "Aptos", "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
     background: transparent;
 }
 
@@ -31,14 +31,14 @@ h3,
 .hero-title,
 .section-title,
 .brand-title {
-    font-family: "Noto Serif SC", "Source Han Serif SC", serif;
+    font-family: "Palatino Linotype", "Book Antiqua", "STSong", "Songti SC", serif;
     letter-spacing: -0.02em;
 }
 
 code,
 .font-mono,
 .result-stat-mono {
-    font-family: "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
+    font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
 }
 
 .shell-body {
@@ -115,6 +115,10 @@ code,
     font-size: 1.3rem;
     font-weight: 700;
     line-height: 1.15;
+}
+
+.shell-body .hidden {
+    display: none !important;
 }
 
 .brand-subtitle {

@@ -376,7 +376,7 @@ def test_documents_ui_delete_uses_scoped_query(client):
         response = client.get("/ui/documents")
 
     assert response.status_code == 200
-    assert "?scope=reports/2026" in response.text
+    assert "scope=reports/2026" in response.text
 
 
 @pytest.mark.asyncio

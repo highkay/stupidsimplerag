@@ -3,11 +3,19 @@
 {% block content %}
 <section class="space-y-6">
     <div class="surface-card">
-        <div class="grid gap-4 lg:grid-cols-[1fr_auto] lg:items-end">
+        <form
+            class="grid gap-4 lg:grid-cols-[1fr_auto] lg:items-end"
+            hx-get="/ui/documents"
+            hx-target="#document-list-container"
+            hx-swap="innerHTML transition:true"
+            hx-trigger="submit, keyup changed delay:350ms from:#document-search, change from:#document-limit"
+            hx-indicator="#global-indicator"
+            data-busy-text="正在加载文档列表..."
+        >
             <div class="space-y-3">
                 <span class="soft-label">文档管理</span>
                 <h1 class="section-title">按 `filename + scope` 查看和删除已入库文档。</h1>
-                <p class="text-sm text-base-content/70">删除会清缓存。Grounding 定位文档时优先用 `doc_hash`，没有时再用这里看到的 `filename + scope`。</p>
+                <p class="text-sm text-base-content/70">默认只取一小批结果。删除会清缓存；要精确定位文档，优先用 `doc_hash`。</p>
             </div>
             <div class="flex flex-col gap-3 sm:flex-row sm:items-center">
                 <label class="input input-bordered flex items-center gap-2">
@@ -15,28 +23,42 @@
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-4.35-4.35m1.85-5.15a7 7 0 11-14 0 7 7 0 0114 0z" />
                     </svg>
                     <input
+                        id="document-search"
                         type="text"
+                        name="search"
                         placeholder="搜索 filename / scope / date"
-                        data-document-filter
-                        oninput="window.filterDocumentRows(this.value)"
+                        value="{{ document_search }}"
                         class="grow"
                     >
                 </label>
+                <label class="select select-bordered">
+                    <select id="document-limit" name="limit">
+                        {% for option in [50, 100, 200] %}
+                        <option value="{{ option }}" {% if document_limit == option %}selected{% endif %}>{{ option }} 条</option>
+                        {% endfor %}
+                    </select>
+                </label>
                 <button
                     class="btn btn-outline"
-                    hx-get="/ui/documents"
-                    hx-target="#document-list-container"
-                    hx-swap="innerHTML transition:true"
-                    data-busy-text="正在刷新文档列表..."
+                    type="submit"
                 >
                     刷新列表
                 </button>
             </div>
-        </div>
+        </form>
     </div>
 
-    <div id="document-list-container">
-        {% include "partials/document_list.html" %}
+    <div
+        id="document-list-container"
+        hx-get="/ui/documents?limit={{ document_limit }}"
+        hx-trigger="load"
+        hx-indicator="#global-indicator"
+        data-busy-text="正在加载文档列表..."
+    >
+        <div class="empty-panel">
+            <h3>正在加载文档列表</h3>
+            <p>默认只取少量结果，输入搜索词可以进一步缩小范围。</p>
+        </div>
     </div>
 </section>
 {% endblock %}

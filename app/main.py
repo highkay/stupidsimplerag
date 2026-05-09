@@ -64,6 +64,8 @@ if static_dir.exists():
 logger = logging.getLogger(__name__)
 BATCH_INGEST_CONCURRENCY = max(1, int(os.getenv("BATCH_INGEST_CONCURRENCY", "4")))
 MAX_BATCH_FILES = max(1, int(os.getenv("BATCH_MAX_FILES", "20")))
+DOCUMENT_UI_DEFAULT_LIMIT = 100
+DOCUMENT_UI_MAX_LIMIT = 200
 INSERT_MAX_RETRIES = max(1, int(os.getenv("INGEST_INSERT_MAX_RETRIES", "3")))
 INSERT_RETRY_BACKOFF = float(os.getenv("INGEST_INSERT_RETRY_BACKOFF", "2.0"))
 QUERY_MAX_RETRIES = max(1, int(os.getenv("QUERY_MAX_RETRIES", "3")))
@@ -229,6 +231,14 @@ def _parse_bool(raw: Optional[str]) -> bool:
         return False
     value = str(raw).strip().lower()
     return value in ("1", "true", "on", "yes")
+
+
+def _clamp_document_limit(raw: Optional[int]) -> int:
+    try:
+        value = int(raw or DOCUMENT_UI_DEFAULT_LIMIT)
+    except (TypeError, ValueError):
+        value = DOCUMENT_UI_DEFAULT_LIMIT
+    return max(1, min(value, DOCUMENT_UI_MAX_LIMIT))
 
 
 def _split_compact_values(raw: Optional[str]) -> List[str]:
@@ -894,33 +904,53 @@ async def delete_document_api(filename: str, scope: Optional[str] = Query(None))
 
 
 @app.get("/ui/documents", response_class=HTMLResponse)
-async def list_documents_ui(request: Request) -> HTMLResponse:
+async def list_documents_ui(
+    request: Request,
+    search: Optional[str] = Query(None),
+    limit: Optional[int] = Query(DOCUMENT_UI_DEFAULT_LIMIT),
+) -> HTMLResponse:
     """UI fragment for listing documents (HTMX)."""
-    docs = await list_all_documents()
+    normalized_search = (search or "").strip() or None
+    normalized_limit = _clamp_document_limit(limit)
+    docs = await list_all_documents(limit=normalized_limit, search=normalized_search)
     return templates.TemplateResponse(
         request,
         "partials/document_list.html",
-        {"documents": docs},
+        {
+            "documents": docs,
+            "document_search": normalized_search or "",
+            "document_limit": normalized_limit,
+        },
     )
 
 
 @app.delete("/ui/documents/{filename}", response_class=HTMLResponse)
 async def delete_document_ui(
-    request: Request, filename: str, scope: Optional[str] = Query(None)
+    request: Request,
+    filename: str,
+    scope: Optional[str] = Query(None),
+    search: Optional[str] = Query(None),
+    limit: Optional[int] = Query(DOCUMENT_UI_DEFAULT_LIMIT),
 ) -> HTMLResponse:
     """HTMX endpoint to delete a document and return the updated list."""
     scope = _normalize_scope(scope)
+    normalized_search = (search or "").strip() or None
+    normalized_limit = _clamp_document_limit(limit)
     success = await delete_nodes_by_filename(filename, scope=scope)
     if not success:
         target = f"{filename} (scope={scope})" if scope else f"{filename} (unscoped)"
         raise HTTPException(status_code=404, detail=f"Document not found: {target}")
     CACHE.clear()
     # After deletion, return the updated list fragment
-    docs = await list_all_documents()
+    docs = await list_all_documents(limit=normalized_limit, search=normalized_search)
     return templates.TemplateResponse(
         request,
         "partials/document_list.html",
-        {"documents": docs},
+        {
+            "documents": docs,
+            "document_search": normalized_search or "",
+            "document_limit": normalized_limit,
+        },
     )
 
 
@@ -986,11 +1016,13 @@ async def grounding_page(request: Request) -> HTMLResponse:
 
 @app.get("/ui/documents/manage", response_class=HTMLResponse)
 async def documents_page(request: Request) -> HTMLResponse:
-    docs = await list_all_documents()
     return templates.TemplateResponse(
         request,
         "documents.html",
-        {"documents": docs},
+        {
+            "document_search": "",
+            "document_limit": DOCUMENT_UI_DEFAULT_LIMIT,
+        },
     )
 
 
