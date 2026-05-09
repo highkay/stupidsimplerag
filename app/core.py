@@ -5,6 +5,7 @@ import re
 import time
 import datetime
 import asyncio
+import threading
 from dataclasses import dataclass
 from typing import Any, Callable, ClassVar, List, Optional, Tuple
 from urllib.parse import urlparse, urlunparse
@@ -67,6 +68,34 @@ RELATION_KEYWORDS = (
     "导入",
 )
 
+GENERATED_STOCK_ALIAS_CONTEXT_KEYWORDS = (
+    "推荐",
+    "看好",
+    "关注",
+    "布局",
+    "增持",
+    "受益",
+    "弹性",
+    "催化",
+)
+
+CHINESE_STOCK_ALIAS_SUFFIXES = (
+    "控股股份有限公司",
+    "集团股份有限公司",
+    "股份有限公司",
+    "控股有限公司",
+    "集团有限公司",
+    "有限公司",
+    "控股股份",
+    "集团股份",
+    "控股",
+    "集团",
+    "股份",
+    "银行",
+    "证券",
+    "保险",
+)
+
 
 @dataclass(frozen=True)
 class _GroundingChunk:
@@ -103,6 +132,10 @@ embedding_timeout = float(os.getenv("EMBEDDING_TIMEOUT", "60"))
 llm_context_window = int(os.getenv("LLM_CONTEXT_WINDOW", "8192"))
 EMBEDDING_MAX_RETRIES = int(os.getenv("EMBEDDING_MAX_RETRIES", "3"))
 EMBEDDING_RETRY_BACKOFF = float(os.getenv("EMBEDDING_RETRY_BACKOFF", "1.5"))
+EMBEDDING_REQUEST_BATCH_SIZE = max(
+    1, int(os.getenv("EMBEDDING_REQUEST_BATCH_SIZE", "4"))
+)
+EMBEDDING_CONCURRENCY = max(1, int(os.getenv("EMBEDDING_CONCURRENCY", "1")))
 RERANK_MAX_RETRIES = int(os.getenv("RERANK_MAX_RETRIES", "3"))
 RERANK_RETRY_BACKOFF = float(os.getenv("RERANK_RETRY_BACKOFF", "1.5"))
 fastembed_model_name = os.getenv(
@@ -160,8 +193,12 @@ class OpenAICompatibleEmbedding(BaseEmbedding):
         self._timeout = timeout
         self._max_retries = EMBEDDING_MAX_RETRIES
         self._retry_backoff = EMBEDDING_RETRY_BACKOFF
+        self._request_batch_size = EMBEDDING_REQUEST_BATCH_SIZE
+        self._max_concurrency = EMBEDDING_CONCURRENCY
         self._query_prefix = _normalize_embedding_prefix(query_prefix)
         self._text_prefix = _normalize_embedding_prefix(text_prefix)
+        self._sync_semaphore = threading.BoundedSemaphore(self._max_concurrency)
+        self._async_semaphore = asyncio.Semaphore(self._max_concurrency)
         
         # Persistent clients for connection pooling
         self._client = httpx.Client(timeout=self._timeout)
@@ -184,6 +221,12 @@ class OpenAICompatibleEmbedding(BaseEmbedding):
             return texts
         return [self._prepare_text_input(text) for text in texts]
 
+    def _iter_input_batches(self, inputs: List[str]) -> List[List[str]]:
+        return [
+            inputs[index : index + self._request_batch_size]
+            for index in range(0, len(inputs), self._request_batch_size)
+        ]
+
     def _send_embedding_request(self, inputs: List[str]) -> List[dict]:
         payload: dict = {"model": self._model, "input": inputs}
         if self._dimensions:
@@ -193,11 +236,12 @@ class OpenAICompatibleEmbedding(BaseEmbedding):
         
         for attempt in range(1, self._max_retries + 1):
             try:
-                response = self._client.post(
-                    url,
-                    json=payload,
-                    headers=self._headers(),
-                )
+                with self._sync_semaphore:
+                    response = self._client.post(
+                        url,
+                        json=payload,
+                        headers=self._headers(),
+                    )
                 response.raise_for_status()
                 result = response.json()
                 data = result.get("data", [])
@@ -220,11 +264,12 @@ class OpenAICompatibleEmbedding(BaseEmbedding):
 
         for attempt in range(1, self._max_retries + 1):
             try:
-                response = await self._aclient.post(
-                    url,
-                    json=payload,
-                    headers=self._headers(),
-                )
+                async with self._async_semaphore:
+                    response = await self._aclient.post(
+                        url,
+                        json=payload,
+                        headers=self._headers(),
+                    )
                 response.raise_for_status()
                 result = response.json()
                 data = result.get("data", [])
@@ -239,29 +284,31 @@ class OpenAICompatibleEmbedding(BaseEmbedding):
         raise last_error or RuntimeError("Async embedding request failed")
 
     def _embedding_request(self, inputs: List[str]) -> List[List[float]]:
-        data = self._send_embedding_request(inputs)
-        if len(data) == len(inputs):
-            return [item["embedding"] for item in data]
-        
         embeddings: List[List[float]] = []
-        for text in inputs:
-            single_data = self._send_embedding_request([text])
-            if not single_data:
-                raise ValueError("Embedding API returned empty response for single input")
-            embeddings.append(single_data[0]["embedding"])
+        for batch in self._iter_input_batches(inputs):
+            data = self._send_embedding_request(batch)
+            if len(data) == len(batch):
+                embeddings.extend(item["embedding"] for item in data)
+                continue
+            for text in batch:
+                single_data = self._send_embedding_request([text])
+                if not single_data:
+                    raise ValueError("Embedding API returned empty response for single input")
+                embeddings.append(single_data[0]["embedding"])
         return embeddings
 
     async def _aembedding_request(self, inputs: List[str]) -> List[List[float]]:
-        data = await self._asend_embedding_request(inputs)
-        if len(data) == len(inputs):
-            return [item["embedding"] for item in data]
-        
         embeddings: List[List[float]] = []
-        for text in inputs:
-            single_data = await self._asend_embedding_request([text])
-            if not single_data:
-                raise ValueError("Embedding API returned empty response for single input")
-            embeddings.append(single_data[0]["embedding"])
+        for batch in self._iter_input_batches(inputs):
+            data = await self._asend_embedding_request(batch)
+            if len(data) == len(batch):
+                embeddings.extend(item["embedding"] for item in data)
+                continue
+            for text in batch:
+                single_data = await self._asend_embedding_request([text])
+                if not single_data:
+                    raise ValueError("Embedding API returned empty response for single input")
+                embeddings.append(single_data[0]["embedding"])
         return embeddings
 
     def _get_query_embedding(self, query: str) -> List[float]:
@@ -1899,18 +1946,48 @@ def _candidate_name(candidate: GroundingCandidate) -> str:
     return candidate.name or candidate.identifier or "unknown"
 
 
+def _normalize_candidate_variant(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _generate_stock_alias_variants(candidate: GroundingCandidate) -> List[str]:
+    if (candidate.candidate_type or "").lower() != "stock":
+        return []
+    name = _normalize_candidate_variant(candidate.name)
+    if not name:
+        return []
+
+    generated: List[str] = []
+    for suffix in CHINESE_STOCK_ALIAS_SUFFIXES:
+        if not name.endswith(suffix):
+            continue
+        alias = name[: -len(suffix)].strip()
+        if len(alias) < 2:
+            continue
+        if alias not in generated:
+            generated.append(alias)
+    return generated
+
+
 def _candidate_variants(candidate: GroundingCandidate) -> List[str]:
     values: List[str] = []
     for raw in [candidate.name, candidate.identifier, *(candidate.aliases or [])]:
-        if not raw:
-            continue
-        text = str(raw).strip()
+        text = _normalize_candidate_variant(raw)
         if text and text not in values:
             values.append(text)
         if "." in text:
             code_prefix = text.split(".", 1)[0]
             if code_prefix and code_prefix not in values:
                 values.append(code_prefix)
+    return values
+
+
+def _candidate_generated_variants(candidate: GroundingCandidate) -> List[str]:
+    values: List[str] = []
+    explicit = set(_candidate_variants(candidate))
+    for text in _generate_stock_alias_variants(candidate):
+        if text and text not in explicit and text not in values:
+            values.append(text)
     return values
 
 
@@ -1930,6 +2007,18 @@ def _variant_hit(text: str, normalized_text: str, variant: str) -> bool:
 
 def _relation_keyword_hits(text: str) -> int:
     return sum(1 for keyword in RELATION_KEYWORDS if keyword in text)
+
+
+def _supports_generated_stock_alias_match(
+    candidate: GroundingCandidate,
+    block: _GroundingBlock,
+    text: str,
+) -> bool:
+    if (candidate.candidate_type or "").lower() != "stock":
+        return False
+    if block.section_type in {"appendix_list", "appendix_table"}:
+        return True
+    return any(keyword in text for keyword in GENERATED_STOCK_ALIAS_CONTEXT_KEYWORDS)
 
 
 def _section_weight(section_type: str) -> int:
@@ -2031,18 +2120,28 @@ async def _ground_single_candidate(
 ) -> GroundingResult:
     candidate_name = _candidate_name(candidate)
     variants = _candidate_variants(candidate)
+    generated_variants = _candidate_generated_variants(candidate)
     candidate_blocks: List[dict] = []
     body_hit_count = 0
     qa_hit_count = 0
     list_hit_count = 0
     title_hit_count = 0
     relation_hits = 0
+    used_generated_variant = False
 
     for block in blocks:
         text = block.text
         normalized = _normalized_match_text(text)
         matched_variants = [variant for variant in variants if _variant_hit(text, normalized, variant)]
-        if not matched_variants:
+        matched_generated_variants = [
+            variant
+            for variant in generated_variants
+            if _variant_hit(text, normalized, variant)
+        ]
+        if not matched_variants and matched_generated_variants:
+            if not _supports_generated_stock_alias_match(candidate, block, text):
+                matched_generated_variants = []
+        if not matched_variants and not matched_generated_variants:
             continue
 
         keyword_hits = _relation_keyword_hits(text)
@@ -2056,16 +2155,22 @@ async def _ground_single_candidate(
         elif block.section_type in {"appendix_list", "appendix_table"}:
             list_hit_count += 1
         relation_hits += keyword_hits
+        used_generated_variant = used_generated_variant or bool(
+            matched_generated_variants and not matched_variants
+        )
 
         candidate_blocks.append(
             {
                 "block": block,
-                "matched_variants": matched_variants,
-                "is_alias_hit": bool(matched_variants),
+                "matched_variants": matched_variants or matched_generated_variants,
+                "is_alias_hit": bool(matched_variants or matched_generated_variants),
+                "used_generated_variant": bool(
+                    matched_generated_variants and not matched_variants
+                ),
                 "base_score": (
                     _section_weight(block.section_type) * 100
                     + min(keyword_hits, 5) * 10
-                    + min(len(matched_variants), 3) * 5
+                    + min(len(matched_variants or matched_generated_variants), 3) * 5
                 ),
             }
         )
@@ -2088,14 +2193,19 @@ async def _ground_single_candidate(
     has_non_list = any(item["block"].section_type in {"title", "body", "qa"} for item in candidate_blocks)
     if has_non_list:
         tier = "body_grounded" if (title_hit_count or body_hit_count >= 2 or relation_hits > 0) else "relation_grounded"
+        if used_generated_variant and tier == "body_grounded":
+            tier = "relation_grounded"
         source_candidates = [
             item for item in candidate_blocks if item["block"].section_type in {"title", "body", "qa"}
         ]
-        source_reason = (
-            "正文存在显式提及，并伴随竞争、供应链、订单或风险等关系论述。"
-            if tier == "body_grounded"
-            else "正文存在显式提及，但论述更偏关系映射或轻度展开。"
-        )
+        if used_generated_variant:
+            source_reason = "正文未写全称，但以股票简称/短称出现，且上下文支持该候选的关系型提及。"
+        else:
+            source_reason = (
+                "正文存在显式提及，并伴随竞争、供应链、订单或风险等关系论述。"
+                if tier == "body_grounded"
+                else "正文存在显式提及，但论述更偏关系映射或轻度展开。"
+            )
     else:
         tier = "list_only"
         source_candidates = [

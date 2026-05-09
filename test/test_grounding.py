@@ -149,6 +149,63 @@ async def test_grounding_returns_not_found_for_missing_candidate():
 
 
 @pytest.mark.asyncio
+async def test_grounding_infers_stock_short_name_when_context_supports_it():
+    point = _make_point(
+        filename="regional_banks.md",
+        content=(
+            "区域银行配置价值提升，重点推荐宁波、北京、上海、成都、长沙、苏州，"
+            "同时继续看好高股息大中型银行。"
+        ),
+        doc_hash="regional-bank-doc",
+        scope=None,
+        summary="本文讨论区域银行配置价值与推荐方向。",
+    )
+
+    with patch("app.core._scroll_points_by_filter", new=AsyncMock(return_value=[point])):
+        response = await run_grounding_query(
+            GroundingRequest.model_validate(
+                {
+                    "document": {"doc_hash": "regional-bank-doc"},
+                    "candidates": [{"name": "宁波银行", "candidate_type": "stock"}],
+                    "skip_rerank": True,
+                }
+            )
+        )
+
+    result = response.candidate_results[0]
+    assert result.relevance_tier == "relation_grounded"
+    assert result.source_zone == "body"
+    assert "简称/短称" in result.source_reason
+    assert result.excerpts
+
+
+@pytest.mark.asyncio
+async def test_grounding_does_not_use_generated_stock_short_name_without_context():
+    point = _make_point(
+        filename="ningbo_macro.md",
+        content="宁波地区制造业投资保持增长，外贸景气度继续改善。",
+        doc_hash="ningbo-macro-doc",
+        scope=None,
+        summary="本文讨论宁波地区宏观经济。",
+    )
+
+    with patch("app.core._scroll_points_by_filter", new=AsyncMock(return_value=[point])):
+        response = await run_grounding_query(
+            GroundingRequest.model_validate(
+                {
+                    "document": {"doc_hash": "ningbo-macro-doc"},
+                    "candidates": [{"name": "宁波银行", "candidate_type": "stock"}],
+                    "skip_rerank": True,
+                }
+            )
+        )
+
+    result = response.candidate_results[0]
+    assert result.relevance_tier == "not_found"
+    assert result.source_zone == "not_found"
+
+
+@pytest.mark.asyncio
 async def test_grounding_ignores_stale_list_metadata_for_pdf_body_chunk():
     content = """<<<< FILE_START: 276654 >>>>
 ---

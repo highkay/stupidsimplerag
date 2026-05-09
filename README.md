@@ -268,7 +268,7 @@ curl -X POST http://localhost:8000/chat \
 ### 并发 / 重试 / 超时（高级）
 
 - `LLM_CONTEXT_WINDOW`, `LLM_CONCURRENCY`, `LLM_MAX_RETRIES`, `LLM_RETRY_BACKOFF`
-- `EMBEDDING_MAX_RETRIES`, `EMBEDDING_RETRY_BACKOFF`
+- `EMBEDDING_MAX_RETRIES`, `EMBEDDING_RETRY_BACKOFF`, `EMBEDDING_CONCURRENCY`, `EMBEDDING_REQUEST_BATCH_SIZE`
 - `RERANK_TIMEOUT`, `RERANK_MAX_RETRIES`, `RERANK_RETRY_BACKOFF`, `RERANK_RETURN_DOCUMENTS`
 - `INSERT_BATCH_SIZE`, `INGEST_INSERT_MAX_RETRIES`, `INGEST_INSERT_RETRY_BACKOFF`
 - `QUERY_MAX_RETRIES`, `QUERY_RETRY_BACKOFF`
@@ -339,10 +339,13 @@ pytest -q
 
 - `EMBEDDING_TIMEOUT=60`
 - `INSERT_BATCH_SIZE=8`
+- `EMBEDDING_CONCURRENCY=1`
+- `EMBEDDING_REQUEST_BATCH_SIZE=4`
 - `EMBEDDING_UBATCH=1024`
 - `EMBEDDING_THREADS_BATCH=8`
 
 这样可以避免大文档入库时单次 `/v1/embeddings` 请求超过客户端超时，导致 `/ingest` 或 `/ingest/text` 返回 `500`。
+同时，当前实现会对 embedding 请求做全局并发限流与子批次切分，避免多个长文本批次同时压垮 `llama.cpp` 的 slot/KV cache。
 在 `192.168.1.11` 上的同口径 Vulkan 对照里，`ubatch=1024` 相比 `2048` 同时降低了平均时延和 CPU 峰值；在相同 `ubatch=1024` 下，再显式设置 `threads-batch=8` 也带来了小幅时延改善和更低的平均 CPU 占用，因此当前默认值已调整为 `ubatch=1024`、`threads-batch=8`。
 
 ## 离线回填
