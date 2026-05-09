@@ -135,7 +135,7 @@ EMBEDDING_RETRY_BACKOFF = float(os.getenv("EMBEDDING_RETRY_BACKOFF", "1.5"))
 EMBEDDING_REQUEST_BATCH_SIZE = max(
     1, int(os.getenv("EMBEDDING_REQUEST_BATCH_SIZE", "4"))
 )
-EMBEDDING_CONCURRENCY = max(1, int(os.getenv("EMBEDDING_CONCURRENCY", "1")))
+EMBEDDING_CONCURRENCY = max(1, int(os.getenv("EMBEDDING_CONCURRENCY", "2")))
 RERANK_MAX_RETRIES = int(os.getenv("RERANK_MAX_RETRIES", "3"))
 RERANK_RETRY_BACKOFF = float(os.getenv("RERANK_RETRY_BACKOFF", "1.5"))
 fastembed_model_name = os.getenv(
