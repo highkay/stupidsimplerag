@@ -217,6 +217,7 @@ curl -X POST http://localhost:8000/chat \
 - `process_file()` 会额外写入 `doc_summary`、`section_type`、`section_order`、`block_index`、`chunk_index`、`heading_path`、`is_list_zone`、`is_qa_zone`。
 - 这些字段服务于 `/grounding/query`，不会改变 `/chat` 与 `/chat/lod` 的请求/响应合同。
 - 当前切块不是“整篇文档固定 512 token 生切”。实现会先做 `split_document_blocks()` 语义分区，再对连续 `title/body` block 做合并，并按文档规模对正文 chunk 做自适应放大（默认 `512 -> 768 -> 1024 -> 1536 -> 3072`）；几十万字的超大正文会直接使用更大的 chunk 以降低 embedding 次数，而 `qa` / `appendix_list` / `appendix_table` 仍保持小块以保留 grounding 精度。
+- 当 embedding 后端暴露 `/tokenize`（例如自托管 `llama.cpp`）时，`process_file()` 会对大 chunk 做最终输入 token 准入检查；若拼上 `doc_summary` / `Tags` / `Document:` 前缀后仍超过预算，会在写入前递降 rechunk，避免把超长 node 直接打进 embedding 服务。
 
 2. 检索后处理顺序
 - `ContentFilterPostprocessor`
@@ -248,6 +249,7 @@ curl -X POST http://localhost:8000/chat \
 - `CHAT_LLM_API_BASE`, `CHAT_LLM_API_KEY`, `INGEST_LLM_API_BASE`, `INGEST_LLM_API_KEY`（可选；为 chat / ingest 指向不同 gateway group）
 - `LLM_ROUTER_CONFIG`, `LLM_ROUTER_CONFIG_FILE`, `LLM_ROUTER_STATS_INTERVAL`（可选；启用结构化 router，支持权重、熔断、purpose 分池；`LLM_ROUTER_STATS_INTERVAL` 控制周期性 deployment 摘要日志）
 - `EMBEDDING_MODEL`, `EMBEDDING_API_KEY`, `EMBEDDING_API_BASE`, `EMBEDDING_DIM`, `EMBEDDING_TIMEOUT`
+- `EMBEDDING_MAX_INPUT_TOKENS`（可选；自托管 embedding 的最终单输入 token 预算，未显式设置时按 `EMBEDDING_CONTEXT_WINDOW` 和 `EMBEDDING_SERVER_PARALLEL` 推导）
 - `EMBEDDING_QUERY_PREFIX`, `EMBEDDING_DOCUMENT_PREFIX`（为空时保持旧行为；Jina retrieval 建议分别设为 `Query:` / `Document:`）
 - `RERANK_API_URL`, `RERANK_API_KEY`, `RERANK_MODEL`
 - `QDRANT_HOST`, `QDRANT_PORT`, `QDRANT_URL`, `QDRANT_API_KEY`, `COLLECTION_NAME`
@@ -269,6 +271,7 @@ curl -X POST http://localhost:8000/chat \
 
 - `LLM_CONTEXT_WINDOW`, `LLM_CONCURRENCY`, `LLM_MAX_RETRIES`, `LLM_RETRY_BACKOFF`
 - `EMBEDDING_MAX_RETRIES`, `EMBEDDING_RETRY_BACKOFF`, `EMBEDDING_CONCURRENCY`, `EMBEDDING_REQUEST_BATCH_SIZE`
+- `EMBEDDING_CONTEXT_WINDOW`, `EMBEDDING_SERVER_BATCH`, `EMBEDDING_SERVER_PARALLEL`, `EMBEDDING_UBATCH`, `EMBEDDING_THREADS_BATCH`
 - `RERANK_TIMEOUT`, `RERANK_MAX_RETRIES`, `RERANK_RETRY_BACKOFF`, `RERANK_RETURN_DOCUMENTS`
 - `INSERT_BATCH_SIZE`, `INGEST_INSERT_MAX_RETRIES`, `INGEST_INSERT_RETRY_BACKOFF`
 - `QUERY_MAX_RETRIES`, `QUERY_RETRY_BACKOFF`
@@ -341,11 +344,14 @@ pytest -q
 - `INSERT_BATCH_SIZE=8`
 - `EMBEDDING_CONCURRENCY=2`
 - `EMBEDDING_REQUEST_BATCH_SIZE=4`
+- `EMBEDDING_MAX_INPUT_TOKENS=3500`
+- `EMBEDDING_SERVER_BATCH=1024`
+- `EMBEDDING_SERVER_PARALLEL=2`
 - `EMBEDDING_UBATCH=1024`
 - `EMBEDDING_THREADS_BATCH=8`
 
-这样可以避免大文档入库时单次 `/v1/embeddings` 请求超过客户端超时，导致 `/ingest` 或 `/ingest/text` 返回 `500`。
-同时，当前实现会对 embedding 请求做全局并发限流与子批次切分，避免多个长文本批次同时压垮 `llama.cpp` 的 slot/KV cache。
+这样可以把 `llama.cpp` server 的 `parallel / batch / ubatch` 显式固定下来，并在入库阶段提前截断危险的超长 node，避免多个超长 embedding 任务同时把 slot/KV cache 打穿。
+同时，当前实现仍会对 embedding 请求做全局并发限流与子批次切分，避免多个长文本批次同时压垮 `llama.cpp` 的 slot/KV cache。
 在 `192.168.1.11` 上的同口径 Vulkan 对照里，`ubatch=1024` 相比 `2048` 同时降低了平均时延和 CPU 峰值；在相同 `ubatch=1024` 下，再显式设置 `threads-batch=8` 也带来了小幅时延改善和更低的平均 CPU 占用，因此当前默认值已调整为 `ubatch=1024`、`threads-batch=8`。
 
 ## 离线回填

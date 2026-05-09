@@ -3,6 +3,7 @@ import asyncio
 import pytest
 
 from app import core
+from app.embedding_budget import EmbeddingTokenCounter, get_embedding_input_token_budget
 
 
 def _fake_embedding_response(inputs):
@@ -147,3 +148,49 @@ def test_init_embedding_model_uses_compat_client_when_prefixes_enabled(monkeypat
     assert model._base_model._query_prefix == "Query: "
     assert model._base_model._text_prefix == "Document: "
     assert model._base_model._timeout == 75.0
+
+
+def test_embedding_token_counter_uses_tokenize_endpoint_and_prefix(monkeypatch):
+    counter = EmbeddingTokenCounter(
+        api_base="http://embedding:8080/v1",
+        api_key="sk-test",
+        timeout=5.0,
+        text_prefix="Document:",
+    )
+    captured = {}
+
+    class _Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"tokens": [1, 2, 3, 4]}
+
+    def _fake_post(url, json=None, headers=None):
+        captured["url"] = url
+        captured["json"] = json
+        captured["headers"] = headers
+        return _Response()
+
+    monkeypatch.setattr(counter._client, "post", _fake_post)
+
+    assert counter.count("正文段落") == 4
+    assert captured["url"] == "http://embedding:8080/tokenize"
+    assert captured["json"] == {"content": "Document: 正文段落"}
+    assert captured["headers"]["Authorization"] == "Bearer sk-test"
+
+
+def test_embedding_token_budget_prefers_explicit_env(monkeypatch):
+    monkeypatch.setenv("EMBEDDING_MAX_INPUT_TOKENS", "3500")
+    monkeypatch.setenv("EMBEDDING_CONTEXT_WINDOW", "8192")
+    monkeypatch.setenv("EMBEDDING_SERVER_PARALLEL", "4")
+
+    assert get_embedding_input_token_budget() == 3500
+
+
+def test_embedding_token_budget_derives_from_context_and_parallel(monkeypatch):
+    monkeypatch.delenv("EMBEDDING_MAX_INPUT_TOKENS", raising=False)
+    monkeypatch.setenv("EMBEDDING_CONTEXT_WINDOW", "8192")
+    monkeypatch.setenv("EMBEDDING_SERVER_PARALLEL", "2")
+
+    assert get_embedding_input_token_budget() == 3481

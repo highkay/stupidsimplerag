@@ -92,3 +92,38 @@ async def test_process_file_preserves_appendix_list_metadata_for_large_documents
     assert list_nodes
     assert all(node.metadata["is_list_zone"] is True for node in list_nodes)
     assert all("相关标的" in (node.metadata.get("heading_path") or "") for node in list_nodes)
+
+
+@pytest.mark.asyncio
+async def test_process_file_rechunks_when_embedding_budget_is_exceeded(monkeypatch):
+    paragraph = (
+        "公司在海外市场、毛利率、现金流、研发进展和订单储备方面均有细节披露，"
+        "同时包含多段英文、数字和表格转写内容以抬高 embedding token 密度。"
+    )
+    content = "# 标题\n\n" + "\n\n".join([paragraph] * 900)
+
+    with patch(
+        "app.ingest.analyze_document",
+        new=AsyncMock(
+            return_value=LLMAnalysis(
+                summary="预算校验测试",
+                table_narrative="",
+                keywords=["预算", "切块"],
+            )
+        ),
+    ):
+        monkeypatch.setattr("app.ingest.get_embedding_input_token_budget", lambda: 1800)
+        monkeypatch.setattr(
+            "app.ingest.count_embedding_input_tokens",
+            lambda text: max(1, len(text) // 2),
+        )
+        nodes = await process_file(
+            "budget-rechunk.md",
+            content,
+            ingest_date="2026-05-09",
+            doc_hash="budget-rechunk-hash",
+        )
+
+    assert nodes
+    assert all(len(node.text) // 2 <= 1800 for node in nodes)
+    assert max(len(node.metadata["original_text"]) for node in nodes) < XXL_CHUNK_PLAN[0]

@@ -19,10 +19,14 @@ services:
       - "999"
       - -c
       - "${EMBEDDING_CONTEXT_WINDOW:-8192}"
+      - -b
+      - "${EMBEDDING_SERVER_BATCH:-1024}"
       - -ub
       - "${EMBEDDING_UBATCH:-1024}"
       - -tb
       - "${EMBEDDING_THREADS_BATCH:-8}"
+      - -np
+      - "${EMBEDDING_SERVER_PARALLEL:-2}"
       - --host
       - 0.0.0.0
       - --port

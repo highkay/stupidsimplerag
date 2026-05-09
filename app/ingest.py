@@ -1,4 +1,5 @@
 import asyncio
+from collections import deque
 import hashlib
 import json
 import logging
@@ -11,6 +12,10 @@ from typing import Any, List
 from chonkie import TokenChunker
 from llama_index.core.schema import TextNode
 
+from app.embedding_budget import (
+    count_embedding_input_tokens,
+    get_embedding_input_token_budget,
+)
 from app.models import LLMAnalysis
 from app.openai_utils import build_llm
 from app.preprocess import BODY_SECTION_TYPES, LIST_SECTION_TYPES, PreprocessedBlock, split_document_blocks
@@ -38,6 +43,13 @@ MEDIUM_CHUNK_PLAN = (768, 64)
 LARGE_CHUNK_PLAN = (1024, 80)
 XL_CHUNK_PLAN = (1536, 96)
 XXL_CHUNK_PLAN = (3072, 192)
+_CHUNK_PLAN_ORDER = [
+    XXL_CHUNK_PLAN,
+    XL_CHUNK_PLAN,
+    LARGE_CHUNK_PLAN,
+    MEDIUM_CHUNK_PLAN,
+    DEFAULT_CHUNK_PLAN,
+]
 
 
 @lru_cache(maxsize=8)
@@ -63,6 +75,109 @@ def choose_chunk_plan(*, document_length: int, section_type: str) -> tuple[int, 
     if document_length >= 12_000:
         return MEDIUM_CHUNK_PLAN
     return DEFAULT_CHUNK_PLAN
+
+
+def _next_smaller_chunk_plan(
+    chunk_size: int, chunk_overlap: int
+) -> tuple[int, int]:
+    current = (chunk_size, chunk_overlap)
+    if current in _CHUNK_PLAN_ORDER:
+        idx = _CHUNK_PLAN_ORDER.index(current)
+        if idx + 1 < len(_CHUNK_PLAN_ORDER):
+            return _CHUNK_PLAN_ORDER[idx + 1]
+
+    reduced_size = max(128, chunk_size // 2)
+    if reduced_size >= chunk_size:
+        reduced_size = max(64, chunk_size - 64)
+    reduced_overlap = min(chunk_overlap, max(16, reduced_size // 8))
+    return reduced_size, reduced_overlap
+
+
+def _find_midpoint_split(text: str) -> int | None:
+    if len(text) < 2:
+        return None
+    midpoint = len(text) // 2
+    for marker in ("\n\n", "\n", "。", "；", "，", " "):
+        left = text.rfind(marker, 0, midpoint)
+        if left > 0:
+            return left + len(marker)
+        right = text.find(marker, midpoint)
+        if right > 0:
+            return right + len(marker)
+    return midpoint
+
+
+def _bounded_chunk_texts(
+    *,
+    filename: str,
+    block_index: int,
+    section_type: str,
+    header_text: str,
+    chunk_text: str,
+    chunk_size: int,
+    chunk_overlap: int,
+) -> List[str]:
+    token_budget = get_embedding_input_token_budget()
+    full_text = f"{header_text}{chunk_text}"
+    token_count = count_embedding_input_tokens(full_text)
+    if token_count is None or token_count <= token_budget:
+        return [chunk_text]
+
+    logger.warning(
+        "Embedding token budget exceeded file=%s block=%d section=%s tokens=%s budget=%d chunk_size=%d overlap=%d; rechunking",
+        filename,
+        block_index,
+        section_type,
+        token_count,
+        token_budget,
+        chunk_size,
+        chunk_overlap,
+    )
+
+    bounded: list[str] = []
+    pending: deque[tuple[str, int, int]] = deque([(chunk_text, chunk_size, chunk_overlap)])
+
+    while pending:
+        current_text, current_size, current_overlap = pending.popleft()
+        current_full_text = f"{header_text}{current_text}"
+        current_tokens = count_embedding_input_tokens(current_full_text)
+        if current_tokens is None or current_tokens <= token_budget:
+            bounded.append(current_text)
+            continue
+
+        next_size, next_overlap = _next_smaller_chunk_plan(
+            current_size, current_overlap
+        )
+        split_chunks = [
+            getattr(chunk, "text", str(chunk)).strip()
+            for chunk in _get_chunker(next_size, next_overlap)(current_text)
+        ]
+        split_chunks = [chunk for chunk in split_chunks if chunk]
+
+        if len(split_chunks) <= 1:
+            split_at = _find_midpoint_split(current_text)
+            if split_at is None:
+                logger.error(
+                    "Embedding token budget still exceeded but chunk could not be split file=%s block=%d section=%s tokens=%s budget=%d len=%d",
+                    filename,
+                    block_index,
+                    section_type,
+                    current_tokens,
+                    token_budget,
+                    len(current_text),
+                )
+                bounded.append(current_text)
+                continue
+            split_chunks = [
+                current_text[:split_at].strip(),
+                current_text[split_at:].strip(),
+            ]
+            split_chunks = [chunk for chunk in split_chunks if chunk]
+
+        for split_chunk in reversed(split_chunks):
+            pending.appendleft((split_chunk, next_size, next_overlap))
+
+    return bounded
 
 
 def _merge_chunkable_blocks(blocks: List[PreprocessedBlock]) -> List[PreprocessedBlock]:
@@ -412,41 +527,50 @@ async def process_file(
         )
         for chunk in block_chunker(block.text):
             chunk_text = getattr(chunk, "text", str(chunk))
-            chunk_len = len(chunk_text)
-            total_chars += chunk_len
-            if min_chunk_len is None or chunk_len < min_chunk_len:
-                min_chunk_len = chunk_len
-            if chunk_len > max_chunk_len:
-                max_chunk_len = chunk_len
-            full_text = f"{header_text}{chunk_text}"
-            node_metadata = {
-                "filename": filename,
-                "date": meta_date,
-                "date_numeric": meta_date_numeric,
-                "doc_hash": doc_hash,
-                "doc_summary": doc_summary,
-                "keywords": keywords_str,
-                "keyword_list": keywords,
-                "original_text": chunk_text,
-                "section_type": block.section_type,
-                "section_order": block.section_order,
-                "block_index": block.block_index,
-                "chunk_index": chunk_index,
-                "heading_path": block.heading_path,
-                "is_list_zone": block.is_list_zone,
-                "is_qa_zone": block.is_qa_zone,
-            }
-            if scope:
-                node_metadata["scope"] = scope
+            for bounded_chunk_text in _bounded_chunk_texts(
+                filename=filename,
+                block_index=block.block_index,
+                section_type=block.section_type,
+                header_text=header_text,
+                chunk_text=chunk_text,
+                chunk_size=chunk_size,
+                chunk_overlap=chunk_overlap,
+            ):
+                chunk_len = len(bounded_chunk_text)
+                total_chars += chunk_len
+                if min_chunk_len is None or chunk_len < min_chunk_len:
+                    min_chunk_len = chunk_len
+                if chunk_len > max_chunk_len:
+                    max_chunk_len = chunk_len
+                full_text = f"{header_text}{bounded_chunk_text}"
+                node_metadata = {
+                    "filename": filename,
+                    "date": meta_date,
+                    "date_numeric": meta_date_numeric,
+                    "doc_hash": doc_hash,
+                    "doc_summary": doc_summary,
+                    "keywords": keywords_str,
+                    "keyword_list": keywords,
+                    "original_text": bounded_chunk_text,
+                    "section_type": block.section_type,
+                    "section_order": block.section_order,
+                    "block_index": block.block_index,
+                    "chunk_index": chunk_index,
+                    "heading_path": block.heading_path,
+                    "is_list_zone": block.is_list_zone,
+                    "is_qa_zone": block.is_qa_zone,
+                }
+                if scope:
+                    node_metadata["scope"] = scope
 
-            node = TextNode(
-                text=full_text,
-                metadata=node_metadata,
-            )
-            hash_base = f"{doc_hash or filename}|{scope or ''}"
-            node.id_ = hashlib.md5(f"{hash_base}_{chunk_index}".encode()).hexdigest()
-            nodes.append(node)
-            chunk_index += 1
+                node = TextNode(
+                    text=full_text,
+                    metadata=node_metadata,
+                )
+                hash_base = f"{doc_hash or filename}|{scope or ''}"
+                node.id_ = hashlib.md5(f"{hash_base}_{chunk_index}".encode()).hexdigest()
+                nodes.append(node)
+                chunk_index += 1
     if nodes:
         avg_len = total_chars / len(nodes)
         logger.debug(
