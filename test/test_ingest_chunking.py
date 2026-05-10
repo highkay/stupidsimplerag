@@ -2,6 +2,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from chonkie import TokenChunker
+from llama_index.core.schema import MetadataMode
 
 from app.ingest import (
     DEFAULT_CHUNK_PLAN,
@@ -127,3 +128,30 @@ async def test_process_file_rechunks_when_embedding_budget_is_exceeded(monkeypat
     assert nodes
     assert all(len(node.text) // 2 <= 1800 for node in nodes)
     assert max(len(node.metadata["original_text"]) for node in nodes) < XXL_CHUNK_PLAN[0]
+
+
+@pytest.mark.asyncio
+async def test_process_file_excludes_metadata_from_embedding_content():
+    content = "# 标题\n\n正文第一段。\n\n正文第二段。"
+
+    with patch(
+        "app.ingest.analyze_document",
+        new=AsyncMock(
+            return_value=LLMAnalysis(
+                summary="元数据不应重复进入 embedding 内容。",
+                table_narrative="表格摘要",
+                keywords=["元数据", "embedding"],
+            )
+        ),
+    ):
+        nodes = await process_file(
+            "embed-metadata.md",
+            content,
+            ingest_date="2026-05-10",
+            doc_hash="embed-metadata-hash",
+        )
+
+    assert nodes
+    sample = nodes[0]
+    assert sample.excluded_embed_metadata_keys == list(sample.metadata.keys())
+    assert sample.get_content(metadata_mode=MetadataMode.EMBED) == sample.text

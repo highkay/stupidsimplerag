@@ -567,6 +567,9 @@ async def process_file(
                     text=full_text,
                     metadata=node_metadata,
                 )
+                # Embedding input should be the curated chunk text only; the
+                # metadata remains in Qdrant payload for filtering/grounding.
+                node.excluded_embed_metadata_keys = list(node_metadata.keys())
                 hash_base = f"{doc_hash or filename}|{scope or ''}"
                 node.id_ = hashlib.md5(f"{hash_base}_{chunk_index}".encode()).hexdigest()
                 nodes.append(node)

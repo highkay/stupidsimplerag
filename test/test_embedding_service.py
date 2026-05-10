@@ -1,6 +1,7 @@
 import asyncio
 
 import pytest
+import httpx
 
 from app import core
 from app.embedding_budget import EmbeddingTokenCounter, get_embedding_input_token_budget
@@ -178,6 +179,43 @@ def test_embedding_token_counter_uses_tokenize_endpoint_and_prefix(monkeypatch):
     assert captured["url"] == "http://embedding:8080/tokenize"
     assert captured["json"] == {"content": "Document: 正文段落"}
     assert captured["headers"]["Authorization"] == "Bearer sk-test"
+
+
+def test_embedding_token_counter_recovers_after_transient_http_error(monkeypatch):
+    counter = EmbeddingTokenCounter(
+        api_base="http://embedding:8080/v1",
+        api_key=None,
+        timeout=5.0,
+        text_prefix="Document:",
+    )
+    calls = {"count": 0}
+
+    class _ErrorResponse:
+        status_code = 500
+        request = httpx.Request("POST", "http://embedding:8080/tokenize")
+
+        def raise_for_status(self):
+            raise httpx.HTTPStatusError(
+                "boom",
+                request=self.request,
+                response=self,
+            )
+
+    class _OkResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"tokens": [1, 2, 3]}
+
+    def _fake_post(*args, **kwargs):
+        calls["count"] += 1
+        return _ErrorResponse() if calls["count"] == 1 else _OkResponse()
+
+    monkeypatch.setattr(counter._client, "post", _fake_post)
+
+    assert counter.count("first") is None
+    assert counter.count("second") == 3
 
 
 def test_embedding_token_budget_prefers_explicit_env(monkeypatch):

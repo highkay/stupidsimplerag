@@ -65,8 +65,28 @@ class EmbeddingTokenCounter:
                 self._supported = True
                 return len(ids)
             raise ValueError("tokenize response missing tokens/ids list")
-        except Exception as exc:
+        except ValueError as exc:
             self._supported = False
+            logger.debug(
+                "Embedding tokenize probe unavailable url=%s error=%s",
+                self._tokenize_url,
+                exc,
+            )
+            return None
+        except httpx.HTTPStatusError as exc:
+            status_code = exc.response.status_code if exc.response is not None else None
+            # Treat capability errors as durable; allow transient server/client
+            # issues to retry on the next chunk instead of disabling budget checks.
+            self._supported = False if status_code in {404, 405, 501} else None
+            logger.debug(
+                "Embedding tokenize probe unavailable url=%s status=%s error=%s",
+                self._tokenize_url,
+                status_code,
+                exc,
+            )
+            return None
+        except httpx.HTTPError as exc:
+            self._supported = None
             logger.debug(
                 "Embedding tokenize probe unavailable url=%s error=%s",
                 self._tokenize_url,
