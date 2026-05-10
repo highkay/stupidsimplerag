@@ -394,9 +394,9 @@ python offline_ingest.py \
 
 仓库内置了 [llm_router.example.json](./llm_router.example.json)，已经按当前生产思路拆好了 `chat` 与 `ingest` 两个池：
 
-- `chat`：`grok-4.20-fast`、`LongCat-Flash-Chat`、`gpt-oss:120b`、`gpt-oss2:120b`、`gpt-oss:20b`
-- `ingest`：`LongCat-Flash-Chat`、`gpt-oss:120b`、`gpt-oss2:120b`、`deepseek-v4-flash`、`qwen3-next:80b`
-- `gpt-oss:20b` 当前仅保留在 `chat` 默认池；`gemma4:31b`、`step-3.5-flash`、`qwen-3-235b-a22b-instruct-2507`、`qwen/qwen3.5-122b-a10b`、`qwen3-coder:480b`、`qwen3-coder-next` 已因真实流量下的 `429/503/timeout` 或长尾超时从默认池移除。
+- `chat`：`grok-4.20-fast`、`LongCat-Flash-Chat`、`gpt-oss:120b`、`gpt-oss2:120b`、`meta-llama/llama-4-scout-17b-16e-instruct`、`groq/compound`、`gpt-oss:20b`
+- `ingest`：`LongCat-Flash-Chat`、`gpt-oss:120b`、`gpt-oss2:120b`、`meta-llama/llama-4-scout-17b-16e-instruct`、`groq/compound`、`deepseek-v4-flash`、`qwen3-next:80b`
+- `gpt-oss:20b` 当前仅保留在 `chat` 默认池；`llama-3.3-70b-versatile` 当前仅通过 ingest 合同、未进入默认 chat 池；`qwen3:32b` 与 `Qwen/Qwen3.5-4B` 因真实探针中的 thinking 污染、答案偏移或超时，暂未进入默认池。`gemma4:31b`、`step-3.5-flash`、`qwen-3-235b-a22b-instruct-2507`、`qwen/qwen3.5-122b-a10b`、`qwen3-coder:480b`、`qwen3-coder-next` 已因真实流量下的 `429/503/timeout` 或长尾超时从默认池移除。
 - 默认 scheduler 是保守动态版：`global_max_inflight=6`、`chat` 预留 `2` 个槽位、`ingest` 在 `2..3` 间自适应，而不是把 `chat` 与 `ingest` 永久硬切成两个静态上限。
 
 推荐把它复制成生产文件后，在 `.env` 中只加一行：

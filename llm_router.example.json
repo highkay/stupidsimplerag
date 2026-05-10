@@ -37,6 +37,24 @@
       "cooldown_s": 45
     },
     {
+      "name": "chat-llama-4-scout-17b",
+      "model": "meta-llama/llama-4-scout-17b-16e-instruct",
+      "weight": 2,
+      "max_inflight": 1,
+      "timeout_s": 30,
+      "failure_threshold": 3,
+      "cooldown_s": 30
+    },
+    {
+      "name": "chat-groq-compound",
+      "model": "groq/compound",
+      "weight": 1,
+      "max_inflight": 1,
+      "timeout_s": 45,
+      "failure_threshold": 3,
+      "cooldown_s": 30
+    },
+    {
       "name": "chat-gpt-oss-20b",
       "model": "gpt-oss:20b",
       "weight": 3,
@@ -71,6 +89,24 @@
       "timeout_s": 60,
       "failure_threshold": 3,
       "cooldown_s": 45
+    },
+    {
+      "name": "ingest-llama-4-scout-17b",
+      "model": "meta-llama/llama-4-scout-17b-16e-instruct",
+      "weight": 2,
+      "max_inflight": 1,
+      "timeout_s": 45,
+      "failure_threshold": 3,
+      "cooldown_s": 30
+    },
+    {
+      "name": "ingest-groq-compound",
+      "model": "groq/compound",
+      "weight": 1,
+      "max_inflight": 1,
+      "timeout_s": 60,
+      "failure_threshold": 3,
+      "cooldown_s": 30
     },
     {
       "name": "ingest-deepseek-v4-flash",
@@ -123,6 +159,8 @@
         "chat-longcat-flash",
         "chat-gpt-oss-120b",
         "chat-gpt-oss2-120b",
+        "chat-llama-4-scout-17b",
+        "chat-groq-compound",
         "chat-gpt-oss-20b"
       ],
       "max_inflight": 6,
@@ -134,6 +172,8 @@
         "ingest-longcat-flash",
         "ingest-gpt-oss-120b",
         "ingest-gpt-oss2-120b",
+        "ingest-llama-4-scout-17b",
+        "ingest-groq-compound",
         "ingest-deepseek-v4-flash",
         "ingest-qwen3-next-80b"
       ],
