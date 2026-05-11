@@ -6,10 +6,12 @@ from llama_index.core.schema import MetadataMode
 
 from app.ingest import (
     DEFAULT_CHUNK_PLAN,
+    DocumentAnalysisError,
     MEDIUM_CHUNK_PLAN,
     LARGE_CHUNK_PLAN,
     XL_CHUNK_PLAN,
     XXL_CHUNK_PLAN,
+    analyze_document,
     choose_chunk_plan,
     process_file,
 )
@@ -24,6 +26,20 @@ def test_choose_chunk_plan_keeps_list_sections_small():
 
 def test_choose_chunk_plan_uses_xxl_for_ultra_large_body_documents():
     assert choose_chunk_plan(document_length=350_000, section_type="body") == XXL_CHUNK_PLAN
+
+
+@pytest.mark.asyncio
+async def test_analyze_document_raises_after_llm_failures(monkeypatch):
+    class FailingLLM:
+        async def acomplete(self, _prompt):
+            raise RuntimeError("gateway down")
+
+    monkeypatch.setattr("app.ingest._llm_retry_attempts", 1)
+    monkeypatch.setattr("app.ingest._llm_retry_backoff", 0)
+    monkeypatch.setattr("app.ingest.extractor_llm", FailingLLM())
+
+    with pytest.raises(DocumentAnalysisError, match="failed after 1 attempts"):
+        await analyze_document("content")
 
 
 @pytest.mark.asyncio

@@ -4,8 +4,9 @@ from unittest.mock import patch, MagicMock, AsyncMock
 from llama_index.core.schema import TextNode, NodeWithScore
 from qdrant_client.http.exceptions import UnexpectedResponse
 
+from app import core
 from app.core import KeywordFilterPostprocessor, _ensure_hybrid_collection, perform_hierarchical_search
-from app.ingest import compute_doc_hash, process_file
+from app.ingest import DocumentAnalysisError, compute_doc_hash, process_file
 from app.main import _parse_epoch_date
 from app.models import LLMAnalysis
 
@@ -350,6 +351,122 @@ def test_documents_api_includes_scope(client):
     assert response.status_code == 200
     payload = response.json()
     assert payload[0]["scope"] == "reports/2026"
+
+
+def test_documents_api_passes_limit_and_search(client):
+    with patch("app.main.list_all_documents", new=AsyncMock(return_value=[])) as mock_list:
+        response = client.get("/documents", params={"limit": 25, "search": "alpha"})
+
+    assert response.status_code == 200
+    mock_list.assert_awaited_once_with(limit=25, search="alpha")
+
+
+@pytest.mark.asyncio
+async def test_list_all_documents_stops_after_limit_and_counts_selected_docs(monkeypatch):
+    class FakePoint:
+        def __init__(self, payload):
+            self.payload = payload
+
+    class FakeCount:
+        def __init__(self, count):
+            self.count = count
+
+    class FakeClient:
+        def __init__(self):
+            self.scroll_calls = 0
+            self.count_calls = []
+
+        async def scroll(self, **kwargs):
+            self.scroll_calls += 1
+            assert kwargs["limit"] == 1000
+            return (
+                [
+                    FakePoint({"filename": "b.md", "date": "2026-01-02", "scope": "beta"}),
+                    FakePoint({"filename": "a.md", "date": "2026-01-01"}),
+                    FakePoint({"filename": "c.md", "date": "2026-01-03"}),
+                ],
+                "next-page",
+            )
+
+        async def count(self, **kwargs):
+            self.count_calls.append(kwargs)
+            return FakeCount(7)
+
+    fake_client = FakeClient()
+    monkeypatch.setenv("DOCUMENT_LIST_COUNT_CONCURRENCY", "2")
+    monkeypatch.setattr(core, "_get_async_client", lambda: fake_client)
+    monkeypatch.setattr(core, "_get_collection_name", lambda: "docs")
+
+    docs = await core.list_all_documents(limit=2)
+
+    assert fake_client.scroll_calls == 1
+    assert len(fake_client.count_calls) == 2
+    assert docs == [
+        {"filename": "a.md", "date": "2026-01-01", "chunks": 7, "scope": None},
+        {"filename": "b.md", "date": "2026-01-02", "chunks": 7, "scope": "beta"},
+    ]
+
+
+def test_force_update_analysis_failure_does_not_delete_existing_doc(client):
+    with patch(
+        "app.main.process_file",
+        new=AsyncMock(side_effect=DocumentAnalysisError("analyzer down")),
+    ), patch(
+        "app.main.insert_nodes",
+        new=AsyncMock(return_value=None),
+    ) as mock_insert, patch(
+        "app.main.delete_nodes_by_filename",
+        new=AsyncMock(return_value=True),
+    ) as mock_delete:
+        response = client.post(
+            "/ingest/text",
+            json={
+                "content": "replacement content",
+                "filename": "same.md",
+                "force_update": True,
+            },
+        )
+
+    assert response.status_code == 503
+    mock_insert.assert_not_awaited()
+    mock_delete.assert_not_awaited()
+
+
+def test_force_update_prunes_old_doc_after_successful_insert(client):
+    content = "replacement content"
+    expected_hash = compute_doc_hash(content)
+    nodes = [
+        TextNode(
+            text=content,
+            metadata={
+                "filename": "same.md",
+                "doc_hash": expected_hash,
+                "date": "2026-01-01",
+            },
+        )
+    ]
+
+    with patch("app.main.process_file", new=AsyncMock(return_value=nodes)), patch(
+        "app.main.insert_nodes",
+        new=AsyncMock(return_value=None),
+    ) as mock_insert, patch(
+        "app.main.delete_nodes_by_filename",
+        new=AsyncMock(return_value=True),
+    ) as mock_delete:
+        response = client.post(
+            "/ingest/text",
+            json={
+                "content": content,
+                "filename": "same.md",
+                "force_update": True,
+            },
+        )
+
+    assert response.status_code == 200
+    mock_insert.assert_awaited_once_with(nodes)
+    mock_delete.assert_awaited_once_with(
+        "same.md", scope=None, exclude_doc_hash=expected_hash
+    )
 
 
 def test_delete_document_passes_scope(client):

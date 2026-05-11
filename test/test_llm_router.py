@@ -288,18 +288,12 @@ def test_example_router_config_inherits_shared_gateway_env(monkeypatch):
         context_window=4096,
     )
 
-    assert sorted(chat_llm._delegates_by_name) == [
-        "chat-gpt-oss-120b",
-        "chat-gpt-oss-20b",
-        "chat-grok-fast",
-        "chat-longcat-flash",
-    ]
-    assert sorted(ingest_llm._delegates_by_name) == [
-        "ingest-deepseek-v4-flash",
-        "ingest-gpt-oss-120b",
-        "ingest-longcat-flash",
-        "ingest-qwen3-next-80b",
-    ]
+    assert sorted(chat_llm._delegates_by_name) == sorted(
+        payload["pools"]["chat"]["deployments"]
+    )
+    assert sorted(ingest_llm._delegates_by_name) == sorted(
+        payload["pools"]["ingest"]["deployments"]
+    )
     assert all(
         delegate.api_base == "http://gateway.example.com/v1"
         for delegate in chat_llm._delegates_by_name.values()

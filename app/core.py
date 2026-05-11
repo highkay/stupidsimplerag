@@ -1151,9 +1151,11 @@ def _build_scoped_filter(
     *,
     filename: Optional[str] = None,
     doc_hash: Optional[str] = None,
+    exclude_doc_hash: Optional[str] = None,
     scope: Optional[str],
 ) -> qdrant_models.Filter:
     must: List[Any] = []
+    must_not: List[Any] = []
     if filename:
         must.append(
             qdrant_models.FieldCondition(
@@ -1166,15 +1168,22 @@ def _build_scoped_filter(
                 key="doc_hash", match=qdrant_models.MatchValue(value=doc_hash)
             )
         )
+    if exclude_doc_hash:
+        must_not.append(
+            qdrant_models.FieldCondition(
+                key="doc_hash", match=qdrant_models.MatchValue(value=exclude_doc_hash)
+            )
+        )
     if scope:
         must.append(
             qdrant_models.FieldCondition(
                 key="scope", match=qdrant_models.MatchValue(value=scope)
             )
         )
-        return qdrant_models.Filter(must=must)
+        return qdrant_models.Filter(must=must, must_not=must_not)
     return qdrant_models.Filter(
         must=must,
+        must_not=must_not,
         min_should=qdrant_models.MinShould(
             conditions=_unscoped_payload_conditions(),
             min_count=1,
@@ -1617,7 +1626,12 @@ async def adoc_exists(doc_hash: str, scope: Optional[str] = None) -> bool:
         return False
 
 
-async def delete_nodes_by_filename(filename: str, scope: Optional[str] = None) -> bool:
+async def delete_nodes_by_filename(
+    filename: str,
+    scope: Optional[str] = None,
+    *,
+    exclude_doc_hash: Optional[str] = None,
+) -> bool:
     """Delete all nodes associated with a specific scoped document."""
     if not filename:
         return False
@@ -1626,7 +1640,11 @@ async def delete_nodes_by_filename(filename: str, scope: Optional[str] = None) -
     if not collection:
         return False
     try:
-        flt = _build_scoped_filter(filename=filename, scope=scope)
+        flt = _build_scoped_filter(
+            filename=filename,
+            scope=scope,
+            exclude_doc_hash=exclude_doc_hash,
+        )
         points, _ = await client.scroll(
             collection_name=collection,
             scroll_filter=flt,
@@ -1639,7 +1657,12 @@ async def delete_nodes_by_filename(filename: str, scope: Optional[str] = None) -
             collection_name=collection,
             points_selector=flt,
         )
-        logger.info("Deleted document filename=%s scope=%s", filename, scope)
+        logger.info(
+            "Deleted document filename=%s scope=%s exclude_doc_hash=%s",
+            filename,
+            scope,
+            exclude_doc_hash,
+        )
         return True
     except Exception as exc:
         logger.error(
@@ -1649,6 +1672,51 @@ async def delete_nodes_by_filename(filename: str, scope: Optional[str] = None) -
             exc,
         )
         return False
+
+
+async def _count_document_chunks(
+    client: AsyncQdrantClient,
+    collection: str,
+    *,
+    filename: str,
+    scope: Optional[str],
+) -> int:
+    result = await client.count(
+        collection_name=collection,
+        count_filter=_build_scoped_filter(filename=filename, scope=scope),
+        exact=True,
+    )
+    return int(getattr(result, "count", 0) or 0)
+
+
+async def _fill_document_chunk_counts(
+    client: AsyncQdrantClient,
+    collection: str,
+    docs: List[dict],
+) -> None:
+    if not docs:
+        return
+    concurrency = max(1, int(os.getenv("DOCUMENT_LIST_COUNT_CONCURRENCY", "16")))
+    semaphore = asyncio.Semaphore(concurrency)
+
+    async def _fill_one(doc: dict) -> None:
+        async with semaphore:
+            try:
+                doc["chunks"] = await _count_document_chunks(
+                    client,
+                    collection,
+                    filename=doc["filename"],
+                    scope=doc.get("scope"),
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Failed to count chunks for document filename=%s scope=%s: %s",
+                    doc.get("filename"),
+                    doc.get("scope"),
+                    exc,
+                )
+
+    await asyncio.gather(*(_fill_one(doc) for doc in docs))
 
 
 async def list_all_documents(limit: int = 1000, search: Optional[str] = None) -> List[dict]:
@@ -1661,12 +1729,13 @@ async def list_all_documents(limit: int = 1000, search: Optional[str] = None) ->
     if not collection:
         return []
 
+    limit = max(1, min(int(limit or 1000), 1000))
     docs: dict[tuple[str, Optional[str]], dict] = {}
     offset = None
     points_scanned = 0
-    MAX_POINTS_TO_SCAN = 50000  # Safety cap to prevent infinite or extremely long scans
+    MAX_POINTS_TO_SCAN = int(os.getenv("DOCUMENT_LIST_MAX_POINTS_TO_SCAN", "50000"))
     search_text = (search or "").strip().lower()
-    
+
     while points_scanned < MAX_POINTS_TO_SCAN:
         try:
             result = await client.scroll(
@@ -1697,7 +1766,7 @@ async def list_all_documents(limit: int = 1000, search: Optional[str] = None) ->
                 doc_key = (fname, scope)
                 if doc_key not in docs:
                     if len(docs) >= limit:
-                        continue  # Keep counting chunks for existing docs but don't add new ones
+                        continue
                     docs[doc_key] = {
                         "filename": fname,
                         "date": date,
@@ -1708,16 +1777,27 @@ async def list_all_documents(limit: int = 1000, search: Optional[str] = None) ->
             
             points_scanned += len(points)
             offset = next_offset
+            if len(docs) >= limit:
+                break
             if offset is None:
                 break
         except Exception as exc:
             logger.error("Error scrolling documents for listing: %s", exc)
             break
-            
-    return sorted(
+
+    result = sorted(
         list(docs.values()),
         key=lambda item: (item["filename"], item.get("scope") or ""),
     )
+    await _fill_document_chunk_counts(client, collection, result)
+    logger.debug(
+        "Listed documents returned=%d limit=%d search=%s points_scanned=%d",
+        len(result),
+        limit,
+        search_text or None,
+        points_scanned,
+    )
+    return result
 
 
 def _parse_optional_int(value: Any, default: int) -> int:

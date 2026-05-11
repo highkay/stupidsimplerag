@@ -61,7 +61,7 @@ docker compose -f docker-compose.yml -f docker-compose.llama-embedding.yml up -d
 - `EMBEDDING_GGUF_FILE`
 - `EMBEDDING_COLLECTION_NAME`（建议新集合，如 `financial_reports_jina_v5_1024`）
 
-该覆盖文件会基于当前源码构建 `highkay/stupidsimplerag:llama-embedding`，避免误用旧的 `latest` 运行时镜像，并使用 `ghcr.io/ggml-org/llama.cpp:server-vulkan` 将 embedding 计算卸载到 Vulkan 设备。
+该覆盖文件默认运行 `highkay/stupidsimplerag:${API_IMAGE_TAG:-llama-embedding}`，不会从当前 checkout 自动构建 API 镜像，避免生产机源码滞后时 `compose up` 回滚运行时；需要源码构建时应先确认 checkout 已同步，再显式执行 `docker compose build api`。Embedding 计算由 `ghcr.io/ggml-org/llama.cpp:server-vulkan` 独立服务承担。
 
 Vulkan 模式要求宿主机可用 `/dev/dri`，并且容器需加入 `video` group；覆盖文件已内置这些配置。
 
@@ -103,7 +103,7 @@ uvicorn app.main:app --reload
 `/ingest` 与 `/ingest/batch`：
 
 - 支持 `.md` / `.txt`
-- `force_update`（可选）：`true` 时先删同名文档再重建
+- `force_update`（可选）：`true` 时先成功写入新版本，再按 `(filename, scope)` 删除旧 `doc_hash` 切片，避免分析或写入失败导致旧文档丢失
 - `scope`（可选）：逻辑命名空间，作为文档身份的一部分写入 metadata
 - 可选请求头 `X-File-Mtime`：支持 Unix 时间戳（秒/毫秒）或 ISO 时间，按 `APP_TIMEZONE`（或 `TZ`）归一为日期
 - 同一 `(filename, scope, doc_hash, ingest_date, force_update)` 的并发重复请求会做 in-flight 合并；若同一 `(filename, scope)` 的不同版本同时到达，则会串行执行，避免 `force_update` 重试把同一文档反复 delete + partial reinsert
@@ -187,7 +187,7 @@ curl -X POST http://localhost:8000/chat \
 
 | Endpoint | Method | 说明 |
 | --- | --- | --- |
-| `/documents` | `GET` | 列出文档（按 `filename + scope` 聚合） |
+| `/documents` | `GET` | 列出文档（按 `filename + scope` 聚合）；支持 `limit=1..1000`、`search` |
 | `/documents/{filename}` | `DELETE` | 删除指定文档切片；可选查询参数 `scope`，未传时仅删除无 scope 文档 |
 
 ## Web 控制台
@@ -276,6 +276,7 @@ curl -X POST http://localhost:8000/chat \
 - `INSERT_BATCH_SIZE`, `INGEST_INSERT_MAX_RETRIES`, `INGEST_INSERT_RETRY_BACKOFF`
 - `QUERY_MAX_RETRIES`, `QUERY_RETRY_BACKOFF`
 - `BATCH_INGEST_CONCURRENCY`, `BATCH_MAX_FILES`
+- `DOCUMENT_LIST_COUNT_CONCURRENCY`, `DOCUMENT_LIST_MAX_POINTS_TO_SCAN`
 - `QDRANT_CLIENT_TIMEOUT`
 
 ### 日志

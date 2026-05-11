@@ -40,8 +40,7 @@ services:
     restart: always
 
   api:
-    build: .
-    image: highkay/stupidsimplerag:llama-embedding
+    image: highkay/stupidsimplerag:${API_IMAGE_TAG:-llama-embedding}
     environment:
       EMBEDDING_API_BASE: http://embedding:8080/v1
       EMBEDDING_MODEL: ${SELF_HOSTED_EMBEDDING_MODEL:-jina-embeddings-v5-text-small-retrieval}

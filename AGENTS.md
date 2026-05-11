@@ -71,7 +71,7 @@
   - `reset_qdrant.py`：危险重置集合。
 - `preload_models.py`：预下载 FastEmbed 稀疏模型。
 - `Dockerfile`：使用 BuildKit cache mount 缓存 `apt`、`pip` 与 FastEmbed 构建依赖，并可用本地 `model_cache` 加速模型预热。
-- `docker-compose.llama-embedding.yml`：可选覆盖文件，增加独立 `llama.cpp` Embedding 服务、基于当前源码构建 `api` 镜像，并把 API 切到 1024 维自托管检索栈。
+- `docker-compose.llama-embedding.yml`：可选覆盖文件，增加独立 `llama.cpp` Embedding 服务，默认运行 `highkay/stupidsimplerag:${API_IMAGE_TAG:-llama-embedding}`，不会从当前 checkout 自动构建 `api` 镜像，并把 API 切到 1024 维自托管检索栈。
 - `llm_router.example.json`：结构化 LLM router 示例，默认沿用现有 `LLM_API_BASE` / `LLM_API_KEY` 或 `OPENAI_*`，仅拆分模型池与路由策略。
 
 ## 4. API 合同（当前实现）
@@ -130,7 +130,7 @@
 
 ### 4.4 文档管理
 
-- `GET /documents`：按 `(filename, scope)` 聚合并返回 chunk 数。
+- `GET /documents`：按 `(filename, scope)` 聚合并返回 chunk 数；支持 `limit=1..1000` 与 `search`。
 - `DELETE /documents/{filename}`：支持可选查询参数 `scope`；未传时仅删除无 scope 文档，并清缓存。
 
 ## 5. 检索与排序流水线
@@ -197,6 +197,7 @@
 - `INSERT_BATCH_SIZE`, `INGEST_INSERT_MAX_RETRIES`, `INGEST_INSERT_RETRY_BACKOFF`
 - `QUERY_MAX_RETRIES`, `QUERY_RETRY_BACKOFF`
 - `BATCH_INGEST_CONCURRENCY`, `BATCH_MAX_FILES`
+- `DOCUMENT_LIST_COUNT_CONCURRENCY`, `DOCUMENT_LIST_MAX_POINTS_TO_SCAN`
 - `offline_ingest.py` CLI 额外支持 `--delay-seconds`，用于低负载慢速回填
 
 4. Qdrant

@@ -29,7 +29,7 @@ from app.core import (
     perform_hierarchical_search,
     shutdown_resources,
 )
-from app.ingest import compute_doc_hash, process_file
+from app.ingest import DocumentAnalysisError, compute_doc_hash, process_file
 from app.models import (
     GroundingRequest,
     GroundingResponse,
@@ -364,9 +364,6 @@ async def _process_and_insert_content(
         scope,
     )
     
-    # Check if content exists (hash-based deduplication)
-    # If we are NOT forcing an update, we can skip if hash exists.
-    # If we ARE forcing an update, we should delete old nodes for this filename even if hash is same.
     if not force_update and await adoc_exists(doc_hash, scope=scope):
         logger.info(
             "Skipping ingest for file=%s doc_hash=%s scope=%s (already exists)",
@@ -375,16 +372,6 @@ async def _process_and_insert_content(
             scope,
         )
         return [], True, doc_hash
-
-    if force_update:
-        logger.info(
-            "Force update enabled: deleting existing nodes for filename=%s scope=%s",
-            filename,
-            scope,
-        )
-        await delete_nodes_by_filename(filename, scope=scope)
-        # Clear cache immediately because a document rewrite is in progress.
-        _clear_query_cache(f"force_update delete filename={filename} scope={scope}")
 
     start = time.perf_counter()
     nodes = await process_file(
@@ -407,6 +394,19 @@ async def _process_and_insert_content(
             len(nodes),
             insert_elapsed,
         )
+        if force_update:
+            logger.info(
+                "Force update enabled: pruning old nodes for filename=%s scope=%s current_doc_hash=%s",
+                filename,
+                scope,
+                doc_hash,
+            )
+            await delete_nodes_by_filename(
+                filename,
+                scope=scope,
+                exclude_doc_hash=doc_hash,
+            )
+            _clear_query_cache(f"force_update replace filename={filename} scope={scope}")
     else:
         logger.warning(
             "Skipping insert for file=%s because no nodes were produced",
@@ -565,9 +565,12 @@ async def ingest_api(
     logger.debug("Received upload file=%s size_bytes=%d", file.filename, byte_len)
     content = _decode_upload_bytes(raw_bytes, file.filename)
     ingest_date = _extract_upload_date(file)
-    nodes, skipped, doc_hash = await _process_and_insert_content_deduped(
-        file.filename, content, ingest_date, force_update=force_update, scope=scope
-    )
+    try:
+        nodes, skipped, doc_hash = await _process_and_insert_content_deduped(
+            file.filename, content, ingest_date, force_update=force_update, scope=scope
+        )
+    except DocumentAnalysisError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     status = "skipped" if skipped else "ok"
     logger.info(
         "Ingest complete file=%s status=%s chunks=%d",
@@ -708,9 +711,12 @@ async def ingest_text_api(request: Request, body: TextIngestRequest) -> IngestRe
         len(body.content),
         len(content),
     )
-    nodes, skipped, doc_hash = await _process_and_insert_content_deduped(
-        filename, content, ingest_date, force_update=body.force_update, scope=scope
-    )
+    try:
+        nodes, skipped, doc_hash = await _process_and_insert_content_deduped(
+            filename, content, ingest_date, force_update=body.force_update, scope=scope
+        )
+    except DocumentAnalysisError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     status = "skipped" if skipped else "ok"
     logger.info(
         "Text ingest complete filename=%s status=%s chunks=%d",
@@ -884,9 +890,13 @@ async def chat_lod_api(req: ChatRequest) -> ChatResponse:
 
 
 @app.get("/documents", response_model=List[DocumentInfo])
-async def list_documents_api() -> List[DocumentInfo]:
+async def list_documents_api(
+    search: Optional[str] = Query(None),
+    limit: int = Query(1000, ge=1, le=1000),
+) -> List[DocumentInfo]:
     """API to list all documents."""
-    docs = await list_all_documents()
+    normalized_search = (search or "").strip() or None
+    docs = await list_all_documents(limit=limit, search=normalized_search)
     return [DocumentInfo(**d) for d in docs]
 
 

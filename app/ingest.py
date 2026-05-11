@@ -22,6 +22,12 @@ from app.preprocess import BODY_SECTION_TYPES, LIST_SECTION_TYPES, PreprocessedB
 from app.utils import extract_date_from_filename
 
 logger = logging.getLogger(__name__)
+
+
+class DocumentAnalysisError(RuntimeError):
+    """Raised when the ingest LLM dependency fails after all retries."""
+
+
 def compute_doc_hash(content: str) -> str:
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
@@ -414,10 +420,9 @@ async def analyze_document(text: str) -> LLMAnalysis:
                     delay,
                 )
                 await asyncio.sleep(delay)
-    logger.debug(
-        "Analyzer returning empty payload after failures last_error=%s", last_error
-    )
-    return LLMAnalysis()
+    raise DocumentAnalysisError(
+        f"LLM document analysis failed after {_llm_retry_attempts} attempts"
+    ) from last_error
 
 
 async def process_file(
